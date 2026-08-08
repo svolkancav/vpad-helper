@@ -261,6 +261,99 @@ def _message_box(text: str, flags: int) -> int:
         return 0
 
 
+IS_MACOS = sys.platform == "darwin"
+
+
+def _mac_dialog(text: str, buttons: str, default: str) -> str:
+    """Native dialog via osascript — no toolkit, no dependency."""
+    script = (
+        'display dialog %s with title %s buttons %s default button %s'
+        % (_as_str(text), _as_str(APP_NAME), buttons, _as_str(default))
+    )
+    try:
+        done = subprocess.run(["osascript", "-e", script],
+                              capture_output=True, text=True, timeout=600)
+        return (done.stdout or "").strip()
+    except Exception as exc:
+        print("dialog failed (%r): %s" % (exc, text))
+        return ""
+
+
+def _as_str(value: str) -> str:
+    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def ask_yes_no(text: str) -> bool:
+    if IS_MACOS:
+        return "button returned:Yes" in _mac_dialog(
+            text, '{"Later", "Yes"}', "Yes")
+    return _message_box(text, _MB_YESNO | _MB_ICONQUESTION) == _IDYES
+
+
+def tell(text: str, warn: bool = False) -> None:
+    if IS_MACOS:
+        _mac_dialog(text, '{"OK"}', "OK")
+        return
+    _message_box(text, _MB_OK | (_MB_ICONWARN if warn else _MB_ICONINFO))
+
+
+# ── macOS: Accessibility permission ─────────────────────────────────
+
+ACCESSIBILITY_PANE = (
+    "x-apple.systempreferences:com.apple.preference.security"
+    "?Privacy_Accessibility"
+)
+
+
+def mac_accessibility_trusted() -> bool:
+    """Is this process allowed to post synthetic input?
+
+    Without it CGEvent posts are accepted and then **silently discarded** —
+    the exact same failure shape as a missing gamepad driver on Windows:
+    the bridge connects, reports arrive, and nothing moves. Detected with
+    `AXIsProcessTrusted` (the non-prompting variant, so we control the
+    explanation ourselves).
+    """
+    if not IS_MACOS:
+        return True
+    try:
+        import ctypes  # noqa: PLC0415
+        import ctypes.util  # noqa: PLC0415
+        path = ctypes.util.find_library("ApplicationServices")
+        if not path:
+            return False
+        lib = ctypes.cdll.LoadLibrary(path)
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        return bool(lib.AXIsProcessTrusted())
+    except Exception as exc:
+        print("accessibility probe failed: %r" % (exc,))
+        return False
+
+
+def first_run_accessibility_flow() -> None:
+    """macOS counterpart of the driver prompt: ask up front, explain why,
+    and open the exact settings pane instead of describing where it is."""
+    if not IS_MACOS or mac_accessibility_trusted():
+        return
+    print("accessibility: not trusted — input will be discarded")
+    if ask_yes_no(
+        "V-Pad needs Accessibility permission to move the mouse and press "
+        "keys on this Mac.\n\nWithout it the phone still connects but "
+        "nothing happens.\n\nOpen the setting now?"
+    ):
+        _open_url(ACCESSIBILITY_PANE)
+        tell(
+            "In the list that opened, switch on the app running V-Pad "
+            "Helper, then quit and reopen it.",
+        )
+    else:
+        tell(
+            "Skipped. The phone will connect but no input will reach this "
+            "Mac until Accessibility is allowed.",
+            warn=True,
+        )
+
+
 def ask_install_driver() -> bool:
     return _message_box(
         "V-Pad needs a one-time gamepad driver (ViGEmBus) so games see a "
@@ -536,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
     # Before the engine: it chooses its injection backend once, so a driver
     # installed now is used immediately instead of after a restart.
     first_run_driver_flow(state)
+    first_run_accessibility_flow()
 
     engine_thread = threading.Thread(
         target=lambda: engine.main(engine_argv), daemon=True)
