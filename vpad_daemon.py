@@ -814,6 +814,12 @@ def lan_addresses(override: str | None = None) -> list[str]:
             ip = addr.ip
             if not isinstance(ip, str) or ip.startswith("127."):
                 continue
+            # 169.254/16 is APIPA: an adapter that never got a DHCP lease
+            # (Hyper-V, WSL and VPN stubs leave several behind on Windows).
+            # No phone can ever reach those, and publishing them only makes
+            # the client try dead addresses first.
+            if ip.startswith("169.254."):
+                continue
             if ip not in bucket:
                 bucket.append(ip)
     ordered = physical + tunnels

@@ -138,6 +138,7 @@ class HelperState:
         # mid-session changes nothing until the app is restarted. Saying so
         # is the difference between "it works now" and a silent dead end.
         self.driver_install_started = False
+        self.driver_note = ""
 
     def absorb(self, line: str) -> None:
         if "Injection:" in line:
@@ -235,24 +236,90 @@ def bundled_vigem_installer() -> str | None:
     return None
 
 
-def install_driver() -> None:
-    """Run the bundled installer (UAC prompt), or open the download page."""
+def driver_present() -> bool:
+    """Can we actually open the ViGEm bus right now?
+
+    The authoritative test, not a registry guess: vgamepad raises
+    VIGEM_ERROR_BUS_NOT_FOUND when the driver is absent, which is exactly
+    the failure a user sees as "Steam shows no controller".
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        import vgamepad as vg  # noqa: PLC0415 — Windows-only, optional
+        pad = vg.VX360Gamepad()
+        del pad
+        return True
+    except Exception:
+        return False
+
+
+def install_driver() -> str:
+    """Install ViGEmBus from the bundled MSI, elevated, and wait for it.
+
+    Three things here were wrong in 0.1.x and each one alone was enough to
+    leave the user with no controller:
+
+    * The MSI lives in PyInstaller's extraction dir (`sys._MEIPASS`), which
+      is **deleted when the app exits**. The tray told the user to quit and
+      reopen right after starting the install — pulling the installer's own
+      source out from under it. It is copied to %TEMP% first now.
+    * `msiexec /i` was launched without elevation. Installing a kernel-mode
+      driver needs admin, so UAC may never have appeared at all. Launch it
+      through ShellExecute's `runas` verb so the prompt is guaranteed.
+    * Nothing waited for, or checked, the result. We now block on the
+      installer and re-test the bus, so the tray can say what actually
+      happened instead of leaving the user to guess.
+
+    Returns a short human-readable outcome for the tray.
+    """
+    if not IS_WINDOWS:
+        _open_url(VIGEM_DOWNLOAD_URL)
+        return "Opened the driver download page"
+
     installer = bundled_vigem_installer()
-    if installer and IS_WINDOWS:
-        try:
-            if installer.lower().endswith(".msi"):
-                subprocess.Popen(["msiexec", "/i", installer])
-            else:
-                subprocess.Popen([installer])
-            return
-        except Exception as exc:
-            print("driver installer failed: %r" % (exc,))
-    _open_url(VIGEM_DOWNLOAD_URL)
+    if not installer:
+        _open_url(VIGEM_DOWNLOAD_URL)
+        return "Installer not bundled — opened the download page"
+
+    # Copy out of _MEIPASS: that directory vanishes with the process.
+    try:
+        import shutil  # noqa: PLC0415 — only needed on this path
+        import tempfile  # noqa: PLC0415
+        staged = os.path.join(tempfile.gettempdir(), os.path.basename(installer))
+        shutil.copy2(installer, staged)
+    except Exception as exc:
+        print("could not stage the installer: %r" % (exc,))
+        staged = installer
+
+    try:
+        # -Wait so we know when it finished; -Verb RunAs so UAC is raised
+        # even though we are not elevated.
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Start-Process msiexec -ArgumentList '/i','%s' -Verb RunAs -Wait"
+             % staged.replace("'", "''")],
+            capture_output=True, text=True, timeout=900)
+        if completed.returncode != 0:
+            detail = (completed.stderr or "").strip().splitlines()
+            print("installer returned %d: %s"
+                  % (completed.returncode, detail[-1] if detail else "?"))
+            return "Driver install was cancelled or failed"
+    except Exception as exc:
+        print("driver installer failed: %r" % (exc,))
+        _open_url(VIGEM_DOWNLOAD_URL)
+        return "Could not start the installer — opened the download page"
+
+    if driver_present():
+        return "Driver installed — quit and reopen to use it"
+    return "Driver still not detected (a reboot may be required)"
 
 
 def _install(state: "HelperState") -> None:
     state.driver_install_started = True
-    install_driver()
+    state.driver_note = "Installing driver…"
+    state.driver_note = install_driver()
+    print("driver install: %s" % state.driver_note)
 
 
 def _open_url(url: str) -> None:
@@ -310,7 +377,7 @@ def run_tray(state: HelperState, pump: threading.Thread) -> int:
             ]
             if state.driver_install_started:
                 items.append(pystray.MenuItem(
-                    "Driver installed? Quit and reopen V-Pad Helper",
+                    state.driver_note or "Installing driver…",
                     None, enabled=False))
             else:
                 items.append(pystray.MenuItem(
@@ -336,7 +403,8 @@ def run_tray(state: HelperState, pump: threading.Thread) -> int:
         no push channel, so poll the state the log pump maintains."""
         last = None
         while pump.is_alive():
-            now = (state.connected_to, state.backend, state.driver_missing)
+            now = (state.connected_to, state.backend,
+                   state.driver_missing, state.driver_note)
             if now != last:
                 last = now
                 try:
