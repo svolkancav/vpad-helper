@@ -25,8 +25,11 @@ this category ships a desktop component.
 
 ## Install
 
-1. Download the `.exe` above and run it. It has no installer — it just appears in the
-   system tray.
+1. Download the `.exe` above and run it. **No window opens** — this is a tray app: it
+   installs nothing and just sits next to your clock. On Windows 11 new tray icons
+   start out hidden, so click the **^** arrow to find it (Settings → Personalization →
+   Taskbar → *Other system tray icons* keeps it visible). A notification on first run
+   tells you it is up.
 2. **Windows will warn you** ("Windows protected your PC") because the file is not
    code-signed yet: *More info → Run anyway*.
 3. Windows then asks whether the app may use the network. **Allow it on private

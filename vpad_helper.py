@@ -348,8 +348,28 @@ def run_tray(state: HelperState, pump: threading.Thread) -> int:
                     pass
             threading.Event().wait(1.0)
 
+    def on_setup(tray_icon) -> None:
+        """Runs once the tray loop is live.
+
+        A double-click that opens no window reads as "nothing happened" —
+        the first real-world report of this app was exactly that. Worse on
+        Windows 11, which hides new tray icons behind the overflow arrow by
+        default, so there is nothing to notice at all. A one-shot
+        notification is the cheapest honest answer: it says the app is
+        running and where it lives. `notify` is unsupported on some
+        backends, so a failure here must never take the tray down with it.
+        """
+        tray_icon.visible = True
+        try:
+            tray_icon.notify(
+                "Running in the system tray (click the ^ arrow if you don't "
+                "see it). Your phone can find this computer now.",
+                APP_NAME)
+        except Exception:
+            pass
+
     threading.Thread(target=refresh, daemon=True).start()
-    icon.run()
+    icon.run(setup=on_setup)
     return 0
 
 
