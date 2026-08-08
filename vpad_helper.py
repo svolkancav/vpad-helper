@@ -236,6 +236,75 @@ def bundled_vigem_installer() -> str | None:
     return None
 
 
+# ── First-run dialogs (Win32, no toolkit) ───────────────────────────
+
+_MB_OK = 0x0
+_MB_YESNO = 0x4
+_MB_ICONINFO = 0x40
+_MB_ICONWARN = 0x30
+_MB_ICONQUESTION = 0x20
+_MB_TOPMOST = 0x40000
+_IDYES = 6
+
+
+def _message_box(text: str, flags: int) -> int:
+    """MessageBoxW, or a printed line where there is no Win32."""
+    if not IS_WINDOWS:
+        print(text)
+        return 0
+    try:
+        import ctypes  # noqa: PLC0415 — only needed for the dialog
+        return int(ctypes.windll.user32.MessageBoxW(
+            None, text, APP_NAME, flags | _MB_TOPMOST))
+    except Exception as exc:
+        print("dialog failed (%r): %s" % (exc, text))
+        return 0
+
+
+def ask_install_driver() -> bool:
+    return _message_box(
+        "V-Pad needs a one-time gamepad driver (ViGEmBus) so games see a "
+        "real controller.\n\nInstall it now? Windows will ask for your "
+        "permission.",
+        _MB_YESNO | _MB_ICONQUESTION) == _IDYES
+
+
+def first_run_driver_flow(state: "HelperState") -> None:
+    """Offer the driver install on startup, BEFORE the engine starts.
+
+    A tray-only affordance was the wrong shape: nobody double-clicks an exe
+    expecting to hunt for an icon near the clock and find a menu item there
+    (first user report said exactly that). Asking up front also removes the
+    quit-and-reopen step, because the engine picks its injection backend
+    once at startup — install first and it simply comes up as a real
+    gamepad.
+    """
+    if not IS_WINDOWS or driver_present():
+        return
+    state.driver_missing = True
+    if not ask_install_driver():
+        _message_box(
+            "Skipped. Games will not see a controller until the driver is "
+            "installed — you can do it later from the tray menu.",
+            _MB_OK | _MB_ICONWARN)
+        return
+    state.driver_install_started = True
+    state.driver_note = install_driver()
+    print("driver install: %s" % state.driver_note)
+    if driver_present():
+        state.driver_missing = False
+        _message_box(
+            "Gamepad driver installed. V-Pad Helper is starting — its icon "
+            "lives in the system tray (click the ^ arrow if you don't see "
+            "it).",
+            _MB_OK | _MB_ICONINFO)
+    else:
+        _message_box(
+            "The driver is still not detected. Windows may need a restart "
+            "to finish installing it — reboot, then run V-Pad Helper again.",
+            _MB_OK | _MB_ICONWARN)
+
+
 def driver_present() -> bool:
     """Can we actually open the ViGEm bus right now?
 
@@ -463,6 +532,10 @@ def main(argv: list[str] | None = None) -> int:
             state.absorb(lines.get())
 
     threading.Thread(target=pump_logs, daemon=True).start()
+
+    # Before the engine: it chooses its injection backend once, so a driver
+    # installed now is used immediately instead of after a restart.
+    first_run_driver_flow(state)
 
     engine_thread = threading.Thread(
         target=lambda: engine.main(engine_argv), daemon=True)

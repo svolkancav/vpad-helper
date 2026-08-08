@@ -34,10 +34,11 @@ this category ships a desktop component.
    code-signed yet: *More info → Run anyway*.
 3. Windows then asks whether the app may use the network. **Allow it on private
    networks** — without that the phone can see your computer but cannot connect.
-4. If the tray menu shows **"Install gamepad driver…"**, click it once and accept the
-   prompt. That is [ViGEmBus](https://github.com/nefarius/ViGEmBus), the driver that
-   makes games see a genuine Xbox 360 controller. The installer is bundled — no extra
-   download.
+4. **On first run it offers the gamepad driver** and asks for permission. Accept it.
+   That is [ViGEmBus](https://github.com/nefarius/ViGEmBus), what makes games see a
+   genuine Xbox 360 controller; the installer is bundled, nothing extra to download.
+   Skip it and games will see no controller — the tray menu can still install it
+   later.
 
 Then on the iPhone: open V-Pad → **Connection** → tap your computer → open any layout
 and play. Keep the phone and the PC on the same Wi-Fi network.
