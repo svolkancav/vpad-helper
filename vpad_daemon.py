@@ -584,13 +584,19 @@ def build_injector(preference: str, verbose: bool,
         except ImportError:
             print("!! vgamepad is not installed — falling back to log only.",
                   file=sys.stderr)
-            print("   Install the ViGEmBus driver, then: pip install vgamepad",
+            print("   NO CONTROLLER will appear in games until this is fixed.",
                   file=sys.stderr)
+            print("   From source: pip install vgamepad", file=sys.stderr)
         except Exception as exc:
+            # Overwhelmingly this is "the ViGEmBus driver isn't installed":
+            # vgamepad raises when it cannot open the bus. Say what it means
+            # for the user rather than only what failed.
             print(f"!! ViGEmBus backend unavailable ({exc}) — log only.",
                   file=sys.stderr)
-            print("   Is the ViGEmBus driver installed and the service "
-                  "running?", file=sys.stderr)
+            print("   NO CONTROLLER will appear in games until the gamepad "
+                  "driver is installed.", file=sys.stderr)
+            print("   Tray menu → \"Install gamepad driver…\", accept the "
+                  "prompt, then quit and reopen this app.", file=sys.stderr)
         return LogInjector(verbose)
 
     if choice == "macos":

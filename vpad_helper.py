@@ -32,6 +32,7 @@ Build the Windows one-file .exe from CI (see
 """
 from __future__ import annotations
 
+import io
 import os
 import queue
 import subprocess
@@ -55,12 +56,45 @@ IS_WINDOWS = sys.platform == "win32"
 # verified against), we tee its stdout through a queue and let the tray
 # read the last meaningful line. One writer, one reader, no locks.
 
-class _Tee:
-    """stdout proxy: forwards to the real stream and to a queue."""
+def log_dir() -> str:
+    """Where the log lives. A windowless .exe writes to no console, so
+    without this file a user's "it doesn't work" is undiagnosable."""
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Logs")
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    path = os.path.join(base, APP_NAME)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        return ""
+    return path
 
-    def __init__(self, stream, sink: queue.Queue):
+
+def _open_log():
+    folder = log_dir()
+    if not folder:
+        return None
+    path = os.path.join(folder, "helper.log")
+    try:
+        # Truncate a log that grew past ~1 MB rather than rotate: this is a
+        # troubleshooting aid, and only the current session matters.
+        if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
+            os.remove(path)
+        return io.open(path, "a", encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+class _Tee:
+    """stdout proxy: forwards to the real stream, a queue, and the log."""
+
+    def __init__(self, stream, sink: queue.Queue, log=None):
         self._stream = stream
         self._sink = sink
+        self._log = log
 
     def write(self, text: str) -> int:
         try:
@@ -68,6 +102,12 @@ class _Tee:
                 self._stream.write(text)
         except Exception:
             pass
+        if self._log is not None:
+            try:
+                self._log.write(text)
+                self._log.flush()
+            except Exception:
+                pass
         for line in text.splitlines():
             line = line.strip()
             if line:
@@ -94,6 +134,10 @@ class HelperState:
         self.connected_to: str | None = None
         self.addresses: list[str] = []
         self.driver_missing = False
+        # The injector is chosen once at startup, so installing the driver
+        # mid-session changes nothing until the app is restarted. Saying so
+        # is the difference between "it works now" and a silent dead end.
+        self.driver_install_started = False
 
     def absorb(self, line: str) -> None:
         if "Injection:" in line:
@@ -206,6 +250,11 @@ def install_driver() -> None:
     _open_url(VIGEM_DOWNLOAD_URL)
 
 
+def _install(state: "HelperState") -> None:
+    state.driver_install_started = True
+    install_driver()
+
+
 def _open_url(url: str) -> None:
     try:
         if IS_WINDOWS:
@@ -250,12 +299,26 @@ def run_tray(state: HelperState, pump: threading.Thread) -> int:
     def menu():
         items = [
             pystray.MenuItem(state.summary(), None, enabled=False),
-            pystray.MenuItem(state.backend, None, enabled=False),
-            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Input: " + state.backend, None, enabled=False),
         ]
         if state.driver_missing:
+            items += [
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    "⚠ No gamepad driver — games see no controller",
+                    None, enabled=False),
+            ]
+            if state.driver_install_started:
+                items.append(pystray.MenuItem(
+                    "Driver installed? Quit and reopen V-Pad Helper",
+                    None, enabled=False))
+            else:
+                items.append(pystray.MenuItem(
+                    "Install gamepad driver…", lambda _i, _t: _install(state)))
+        items.append(pystray.Menu.SEPARATOR)
+        if log_dir():
             items.append(pystray.MenuItem(
-                "Install gamepad driver…", lambda _i, _t: install_driver()))
+                "Open log folder", lambda _i, _t: _open_url(log_dir())))
         if IS_WINDOWS and getattr(sys, "frozen", False):
             items.append(pystray.MenuItem(
                 "Start with Windows",
@@ -300,9 +363,12 @@ def main(argv: list[str] | None = None) -> int:
     state = HelperState()
     lines: queue.Queue = queue.Queue(maxsize=2000)
 
-    # Frozen GUI builds have no stdout at all; _Tee tolerates None.
-    sys.stdout = _Tee(sys.stdout, lines)
-    sys.stderr = _Tee(sys.stderr, lines)
+    # Frozen GUI builds have no stdout at all; _Tee tolerates None. The log
+    # file is the only place a packaged run leaves a trace.
+    log = _open_log()
+    sys.stdout = _Tee(sys.stdout, lines, log)
+    sys.stderr = _Tee(sys.stderr, lines, log)
+    print("── %s starting (pid %d) ──" % (APP_NAME, os.getpid()))
 
     def pump_logs() -> None:
         while True:
