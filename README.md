@@ -1,0 +1,94 @@
+# V-Pad Helper
+
+The free companion app that lets **V-Pad: Virtual Gamepad** on your iPhone act as a
+gamepad for your computer.
+
+**[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.exe)** — one file, no installer, lives in the system tray.
+
+---
+
+## Why a helper app is needed
+
+On Android, V-Pad presents the phone *itself* as a Bluetooth gamepad and pairs with
+your PC directly — nothing to install.
+
+iOS does not allow that. Apple reserves the Bluetooth HID device role for the
+system: an app that tries to advertise the HID service (UUID `0x1812`) is refused
+outright by CoreBluetooth, and there is no Bluetooth Classic HID device API at all.
+So on iPhone the phone can never appear in your computer's Bluetooth list, no matter
+what any app claims.
+
+What *is* possible is Wi-Fi. V-Pad on iPhone finds this helper on your local network
+and sends it the same gamepad reports the Android build sends over Bluetooth; the
+helper turns them into real input on your computer. That is also why every iOS app in
+this category ships a desktop component.
+
+## Install
+
+1. Download the `.exe` above and run it. It has no installer — it just appears in the
+   system tray.
+2. **Windows will warn you** ("Windows protected your PC") because the file is not
+   code-signed yet: *More info → Run anyway*.
+3. Windows then asks whether the app may use the network. **Allow it on private
+   networks** — without that the phone can see your computer but cannot connect.
+4. If the tray menu shows **"Install gamepad driver…"**, click it once and accept the
+   prompt. That is [ViGEmBus](https://github.com/nefarius/ViGEmBus), the driver that
+   makes games see a genuine Xbox 360 controller. The installer is bundled — no extra
+   download.
+
+Then on the iPhone: open V-Pad → **Connection** → tap your computer → open any layout
+and play. Keep the phone and the PC on the same Wi-Fi network.
+
+## What the tray shows
+
+| | |
+|---|---|
+| Blue icon | waiting for a phone (the address it published is in the menu) |
+| Green icon | a phone is connected |
+| Injection line | which backend is in use — real gamepad, keyboard/mouse, or log only |
+| Start with Windows | optional; keeps the helper ready after a reboot |
+
+## Platforms
+
+| OS | What you get |
+|---|---|
+| **Windows** | A real virtual Xbox 360 pad via ViGEmBus. Games see an ordinary XInput controller — no key mapping, triggers and sticks are analog. |
+| **macOS** | Keyboard + mouse. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission for your terminal. |
+| **Linux** | Not implemented yet. The protocol is documented and `uinput` is the intended path. |
+
+## Running from source
+
+```bash
+pip install -r requirements.txt
+python3 vpad_daemon.py              # console engine, auto backend
+python3 vpad_daemon.py --inject log # decode frames, inject nothing
+python3 vpad_helper.py              # same engine + tray icon
+```
+
+Useful flags: `--name` (the label the phone shows), `--inject vigem|macos|log`,
+`--mouse-speed`, `--host-ip`, `--verbose`.
+
+## Troubleshooting
+
+**The phone doesn't list my computer.** Both must be on the same Wi-Fi. A VPN on the
+computer is the usual culprit: the helper prints every address it publishes
+(`Published IPs:`) and the phone must be on one of those subnets. Corporate networks
+often block mDNS entirely.
+
+**It's listed but won't connect.** The Windows firewall prompt was probably declined.
+Allow "V-Pad Helper" on private networks in Windows Defender Firewall settings.
+
+**Connected, but nothing happens in the game.** On Windows: the tray still offers
+"Install gamepad driver" — the driver isn't in place. In Steam, also enable
+*Settings → Controller → Generic Gamepad Configuration Support*. On macOS: grant
+Accessibility permission to the app running the helper, otherwise the synthesized
+events are silently discarded.
+
+**Two phones at once?** Not supported by design — the second one is politely refused,
+one phone at a time.
+
+## Privacy
+
+The helper talks to nothing but your phone, over your own network. No accounts, no
+telemetry, no outbound connections. It listens on an ephemeral TCP port and announces
+itself over mDNS so the phone can find it; that traffic never leaves your LAN.

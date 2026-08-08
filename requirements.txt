@@ -1,0 +1,19 @@
+# Runtime deps for the end-user helper app (tools/vpad_helper.py).
+# Bundled into the one-file .exe by tools/vpad-helper.spec — the user
+# installs none of this.
+
+# Bonjour/mDNS publish + service discovery. Pure Python, no Apple Bonjour
+# service needed on Windows.
+zeroconf>=0.132
+
+# Tray icon. Optional at runtime (the helper falls back to console mode
+# without it) but always bundled in the shipped build.
+pystray>=0.19
+pillow>=10.0
+
+# Windows only: real virtual Xbox 360 pad through ViGEmBus. The wheel also
+# carries the ViGEmBus installer, which the .spec copies into the bundle so
+# a fresh user can install the driver from the tray menu instead of hunting
+# GitHub. On macOS/Linux the helper uses its own injection backends, so the
+# marker keeps this off those platforms.
+vgamepad>=0.1.0; sys_platform == "win32"

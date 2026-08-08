@@ -1,0 +1,105 @@
+name: Windows helper (.exe)
+
+# Builds the end-user "V-Pad Helper" tray app that iOS users install on
+# their PC. A Windows .exe cannot be produced from the macOS dev machine —
+# PyInstaller emits host-native binaries — so this is the only build path.
+#
+#   • every push and PR → artifact. This whole repo IS the helper, so there
+#     is nothing to path-filter; packaging breaks in ways only a Windows box
+#     sees (a hidden import PyInstaller cannot infer, package data that never
+#     got collected), so every change is built.
+#   • tag `v*` → artifact + a GitHub Release with the .exe attached. That
+#     release is the public download the iPhone app and the website link to.
+#
+# NOTE on the trigger shape: under `push`, `branches`/`tags` are REF filters.
+# Give only `tags` and a push to a branch never matches — learned the hard
+# way, it produced zero runs. Both filters are listed.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # needed only by the release step on a tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # A packaging build is ~4 minutes. Anything near this ceiling is a hang,
+    # not slowness — see the dependency step for the one that bit us.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Satisfy vgamepad's ViGEmBus check (build host only)
+        # vgamepad ships NO wheel, so `pip install` always executes its
+        # setup.py, and that file ends with:
+        #
+        #     # Prompt installation of the ViGEmBus driver (blocking call)
+        #     if not vigem_installed:
+        #         subprocess.call(['msiexec', '/i', pathMsi], shell=True)
+        #
+        # On a runner that MSI dialog is never answered — the first attempt
+        # hung for 20 minutes. `vigem_installed` is decided by ONE thing:
+        # whether "nefarius virtual gamepad emulation bus driver" appears in
+        # the registry's Uninstall tree. Writing that key satisfies the check
+        # so setup.py skips the installer.
+        #
+        # We are not faking a capability: this host only needs vgamepad's
+        # FILES (the Python package plus the ViGEmBus MSI it carries, which
+        # the .spec bundles). The driver itself belongs on the end user's
+        # machine, installed from the tray menu — installing a kernel driver
+        # on a throwaway runner would be slower and flakier for no gain.
+        shell: pwsh
+        run: |
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\VPadHelperBuildStub"
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty -Path $key -Name DisplayName `
+            -Value "Nefarius Virtual Gamepad Emulation Bus Driver"
+          Set-ItemProperty -Path $key -Name DisplayVersion -Value "1.17.333.0"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build one-file exe
+        run: pyinstaller --noconfirm vpad-helper.spec
+
+      - name: Sanity-check the artifact exists
+        shell: pwsh
+        run: |
+          $exe = "dist/V-Pad Helper.exe"
+          if (-not (Test-Path $exe)) { throw "build produced no exe" }
+          "size: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpad-helper-windows
+          path: dist/V-Pad Helper.exe
+          if-no-files-found: error
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/V-Pad Helper.exe
+          body: |
+            **V-Pad Helper for Windows** — the companion app for V-Pad on iPhone.
+
+            1. Download `V-Pad Helper.exe` and run it. It lives in the system tray.
+            2. If the tray offers "Install gamepad driver", accept it once (ViGEmBus —
+               this is what lets games see a real Xbox controller).
+            3. On the iPhone: open V-Pad → Connection → tap this computer.
+
+            Keep the phone and the PC on the same Wi-Fi network. Windows will ask
+            once whether the app may use the network — allow it on **private**
+            networks, otherwise the phone can see the computer but not connect.
