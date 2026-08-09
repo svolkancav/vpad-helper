@@ -1,5 +1,8 @@
 # V-Pad Helper
 
+[![Build](https://github.com/svolkancav/vpad-helper/actions/workflows/build.yml/badge.svg)](https://github.com/svolkancav/vpad-helper/actions/workflows/build.yml) [![Release](https://img.shields.io/github/v/release/svolkancav/vpad-helper)](https://github.com/svolkancav/vpad-helper/releases/latest) [![License: MIT](https://img.shields.io/github/license/svolkancav/vpad-helper)](LICENSE)
+
+
 The free companion app that lets **V-Pad: Virtual Gamepad** on your iPhone act as a
 gamepad for your computer.
 
