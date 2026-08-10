@@ -122,6 +122,45 @@ def ts() -> str:
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
+def short_hostname() -> str:
+    """`socket.gethostname()` with any domain part removed.
+
+    A router commonly hands out a name like `unknown5a84b66a8be3.home`, and
+    macOS reports it verbatim. Two things then break, both because a dot is a
+    label separator in DNS:
+
+      * `server="{hostname}.local."` becomes `host.home.local.` — a host that
+        does not exist.
+      * the service instance name gains a second label (see
+        [sanitize_instance]).
+
+    Windows never showed this: its computer names cannot contain a dot.
+    """
+    return socket.gethostname().split(".")[0] or "computer"
+
+
+def sanitize_instance(name: str) -> str:
+    """Force `name` into something usable as a DNS-SD instance name.
+
+    RFC 6763 §4.1.1 defines a service instance as `<Instance>.<Service>.<Domain>`
+    where **Instance is a single DNS label**. A dot inside it produces an extra
+    label, so the record stops matching `<Instance>._vpad-bridge._tcp.local` and
+    a browsing client — iOS's NWBrowser among them — silently discards it. The
+    daemon looks healthy and stays invisible.
+
+    Dots become hyphens rather than being dropped, so two machines whose names
+    differ only after the dot still get distinct instances. The result is capped
+    at the 63-byte label limit, counted in UTF-8 because the default name
+    carries an em dash.
+    """
+    cleaned = name.replace(".", "-").strip() or "V-Pad daemon"
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) <= 63:
+        return cleaned
+    # Truncate on a character boundary, not mid-sequence.
+    return encoded[:63].decode("utf-8", "ignore").rstrip("- ")
+
+
 # ── Frame codec ─────────────────────────────────────────────────────
 
 def encode_frame(msg_type: int, payload: bytes) -> bytes:
@@ -855,8 +894,8 @@ def main(argv: list[str] | None = None) -> int:
 
     injector = build_injector(args.inject, args.verbose, args.mouse_speed)
 
-    hostname = socket.gethostname()
-    service_name = args.name or f"V-Pad daemon — {hostname}"
+    hostname = short_hostname()
+    service_name = sanitize_instance(args.name or f"V-Pad daemon — {hostname}")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
