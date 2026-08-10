@@ -34,17 +34,48 @@ tek güvencesi bu.
 ## 2. QR tarayıcı seçimi — önce bunu kararlaştırın
 
 Bu proje APK boyutuna duyarlı (Unity Ads 4,08 MB yüzünden çıkarılmıştı), o
-yüzden seçenekleri boyutlarıyla veriyorum:
+yüzden aşağıdaki rakamlar **tahmin değil, ölçüm**: Maven'daki artefaktların
+`Content-Length`'i, paket içi ML Kit için de AAR açılıp ABI başına ayrıştırıldı
+(2026-08-10).
 
-| Seçenek | Ek boyut | CAMERA izni | Not |
-|---|---|---|---|
-| **`play-services-code-scanner`** | **~70 KB** | **gerekmez** | Google Play services'in kendi tarayıcı arayüzü; model cihaza talep üzerine iner. **Önerilen.** |
-| `mlkit:barcode-scanning` (paket içi model) | ~2,8 MB | gerekir | Çevrimdışı ilk taramada bile çalışır |
-| `play-services-mlkit-barcode-scanning` | ~200 KB | gerekir | Model Play services'ten iner; kendi kamera arayüzünüzü yazarsınız |
+| Seçenek | arm64 cihaza inen | CameraX | CAMERA izni | Play Services |
+|---|---|---|---|---|
+| **`play-services-code-scanner`** | **315 KB** | gerekmez | **gerekmez** | gerekir |
+| **ZXing** (`core` + `android-embedded`) | **742 KB** | gerekmez | gerekir | **gerekmez** |
+| `play-services-mlkit-barcode-scanning` | ~2,0 MB | gerekir | gerekir | gerekir |
+| `mlkit:barcode-scanning` (paket içi model) | **~7,6 MB** | gerekir | gerekir | gerekmez |
 
-`ui/QrScanActivity.kt` **ikinci/üçüncü seçenek** içindir (CameraX + ML Kit,
-kendi kamera ekranı). Birinci seçeneği tercih ederseniz o dosyaya hiç
-ihtiyacınız yok — yerine şu kadarı yeter:
+Paket içi ML Kit'in dökümü (AAR 9,7 MB, ABI'ler bölününce):
+
+```
+arm64-v8a yerel kod   4832 KB   ← yalnız bir ABI cihaza iner
+assets (tflite model)  872 KB   ← her cihaza iner
+classes.jar            388 KB
+                     ─────────
+                      ~6,1 MB  + CameraX 1,5 MB = ~7,6 MB
+```
+
+**Bu, projeden çıkarılan Unity Ads'ten (4,08 MB) daha büyük.** Aynı gerekçeyle
+elenmesi tutarlı olur.
+
+### Öneri
+
+- **Varsayılan: `play-services-code-scanner`.** 315 KB, kamera izni istemez
+  (tarama arayüzü Play services sürecinde çalışır), model talep üzerine iner.
+  Play Store'a dağıtılan bir uygulama için açık ara en iyi denge. Ayrıca
+  `play-services-base`/`basement` bağımlılıkları AdMob üzerinden zaten
+  projede — yani gerçek marjinal maliyet 315 KB'den de az.
+- **GMS'siz cihaz veya çevrimdışı ilk tarama gerekiyorsa: ZXing.** 742 KB ile
+  paket içi ML Kit'in **onda biri**. Karşılığında tarama motoru daha zayıf
+  (düşük ışık ve eğik açıda ML Kit belirgin üstün) ve `zxing-android-embedded`
+  eski kamera yığınını kullanır.
+- **Paket içi ML Kit'i yalnızca** hem GMS'siz cihaz hem de en iyi tarama
+  kalitesi aynı anda şartsa seçin. 7,6 MB'ı ödemeye değer mi, ürün kararı.
+
+`ui/QrScanActivity.kt` **CameraX yolları** içindir (seçenek 3 ve 4). Birinci
+seçenekte o dosyaya hiç ihtiyacınız yok; ZXing'de de kendi `CaptureActivity`'si
+gelir. Her iki durumda da tek yapmanız gereken, okunan ham metni doğrulamaktan
+ibaret:
 
 ```kotlin
 // build.gradle.kts
@@ -88,7 +119,17 @@ orada; tarayıcının kendisi hiçbir güvenlik sağlamaz.
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 ```
 
-**Seçenek 2 (CameraX + ML Kit, `QrScanActivity.kt` kullanılacaksa):**
+**Seçenek 2 (ZXing — Play Services gerektirmez):**
+
+```kotlin
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+```
+
+Kendi `CaptureActivity`'si vardır; `QrScanActivity.kt`'ye gerek kalmaz.
+Doğrulama yine `PairingPayload.parse` üzerinden geçer.
+
+**Seçenek 3/4 (CameraX + ML Kit, `QrScanActivity.kt` kullanılacaksa):**
 
 ```kotlin
     val cameraX = "1.4.2"
