@@ -8,6 +8,8 @@ gamepad for your computer.
 
 **[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.exe)** — one file, no installer, lives in the system tray.
 
+**[⬇ Download for macOS](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.macOS.zip)** — signed and notarised by Apple, so it opens without a Gatekeeper detour. Unzip and run; it lives in the menu bar.
+
 ---
 
 ## Why a helper app is needed
@@ -60,7 +62,7 @@ and play. Keep the phone and the PC on the same Wi-Fi network.
 | OS | What you get |
 |---|---|
 | **Windows** | A real virtual Xbox 360 pad via ViGEmBus. Games see an ordinary XInput controller — no key mapping, triggers and sticks are analog. |
-| **macOS** | Keyboard + mouse. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission for your terminal. |
+| **macOS** | Keyboard + mouse. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission (System Settings → Privacy & Security → Accessibility) — without it macOS accepts the input and silently discards it. |
 | **Linux** | Not implemented yet. The protocol is documented and `uinput` is the intended path. |
 
 ## Running from source
