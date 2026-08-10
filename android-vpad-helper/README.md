@@ -39,7 +39,8 @@ Tasarımın tamamı, gerekçeleri ve tehdit modeli: **[DESIGN.md](DESIGN.md)**
 | Adres kısıtı | yalnızca LAN aralıkları; genel IP ve alan adı **reddedilir** |
 | Rapor uyumu | 8 baytlık REPORT, `HidReportSender`'ın ürettiğiyle **birebir** |
 | Geriye uyum | `--pair` verilmezse daemon bugünkü davranışını korur |
-| Test | **28 Python + 9 uçtan uca + 45 Kotlin = 82**, hepsi geçiyor |
+| Boşta kalma | 2 sn'de bir kalp atışı — host'un 10 sn'lik zaman aşımına karşı |
+| Test | **30 Python + 9 uçtan uca + 49 Kotlin = 88**, hepsi geçiyor |
 
 Kritik ayrıntı: `vpad_daemon.py`'nin 8 baytlık REPORT gövdesi zaten
 `HidReportSender.kt`'nin Bluetooth'a yazdığı 8 baytın aynısıydı — buton
@@ -85,21 +86,19 @@ teslim edilen dosyalarla test edilen dosyalar aynı, sürüklenme imkânsız.
 
 ```bash
 cd host
-python -m unittest discover -s . -v      # 28 + 9 test
+python -m unittest discover -s . -v      # 30 + 9 test
 ```
 
 ### Kotlin çekirdek testleri
 
 ```bash
 cd jvm-verify
-gradle test                               # 45 test
+gradle test                               # 49 test
 ```
 
-Gradle PATH'te yoksa cache'teki dağıtım doğrudan çağrılabilir:
-
-```bash
-~/.gradle/wrapper/dists/gradle-8.14.3-all/*/gradle-8.14.3/bin/gradle test
-```
+Gradle 8.5+ yeterli; wrapper bilinçli olarak eklenmedi (ikili dosya taşımamak
+için). Kurulu değilse `gradle wrapper` ile üretebilir ya da IDE'nizin kendi
+Gradle'ını kullanabilirsiniz.
 
 ### Telefon olmadan uçtan uca deneme
 

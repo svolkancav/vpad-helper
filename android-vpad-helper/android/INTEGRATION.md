@@ -188,32 +188,31 @@ fun encodeReport(buttons: Int, hat: Int, lx: Int, ly: Int,
                  rx: Int, ry: Int, lt: Int, rt: Int): ByteArray
 ```
 
-Önerilen bağlama noktası `ConnectionManager` (veya raporları
-`HidReportSender`'a veren her neresiyse), çünkü `HidReportSender`'ın KDoc'u
-onu "gamepad raporlarının tek hunisi" olarak tanımlıyor — o huniye ikinci bir
-çıkış eklemek doğru yer:
+### Bağlama noktası — Kotlin değil, Dart
 
-```kotlin
-    private var wifi: WifiGamepadClient? = null
+> **Bu bölüm düzeltildi.** İlk sürümü raporları `ConnectionManager` içinde
+> çatallamayı öneriyordu. Uygulama kodu okunduğunda daha iyi bir dikiş yeri
+> çıktı; aşağıdaki doğru olan.
 
-    fun sendGamepadReport(buttons: Int, hat: Int, lx: Int, ly: Int,
-                          rx: Int, ry: Int, lt: Int, rt: Int) {
-        hidSender.sendGamepadReport(buttons, hat, lx, ly, rx, ry, lt, rt)
-        // Ağ yazımı bloklar → ana iş parçacığında ÇAĞIRMAYIN.
-        wifi?.let { client ->
-            netHandler.post {
-                try {
-                    client.sendReport(buttons, hat, lx, ly, rx, ry, lt, rt)
-                } catch (e: IOException) {
-                    // Tek başarısız rapor oturumu öldürmemeli; bir sonraki
-                    // rapor zaten üzerine yazacak. Bluetooth tarafında da
-                    // düşen rapor ölümcül değil.
-                    Log.v(TAG, "wifi rapor düştü", e)
-                }
-            }
-        }
-    }
-```
+Dart tarafında zaten bir taşıyıcı soyutlaması var:
+`lib/core/gamepad/transport/transport.dart` içindeki `GamepadTransport` ve üç
+uygulaması — `AndroidHidTransport` (Bluetooth), `IosNetworkTransport`
+(**ağ**), `DisabledTransport`.
+
+Yani ağ üzerinden gamepad taşımak bu mimaride çözülmüş bir kalıp; iOS tarafı
+tam olarak bunu yapıyor. Doğru hamle, Kotlin'de rapor hunisini çatallamak
+değil, **dördüncü bir taşıyıcı eklemek**: `AndroidWifiTransport`.
+
+Kazanç somut: Bluetooth koduna hiç dokunulmuyor, taşıyıcı seçimi arayüzün
+yaşadığı Dart katmanında kalıyor, ve `ConnectionManager.sendGamepadReport`
+sıcak yolu olduğu gibi duruyor.
+
+`GamepadReport` alanları da (`buttons, hat, lx, ly, rx, ry, lt, rt`)
+`encodeReport` imzasının birebir aynısı — alan eşleme kodu yazmanız
+gerekmiyor.
+
+Kotlin tarafında yazılacak tek yeni şey `WifiChannelHandler`:
+`channel/HidChannelHandler.kt` deseniyle bir MethodChannel + bir EventChannel.
 
 ### Dikkat edilecek üç şey
 
@@ -233,6 +232,14 @@ onu "gamepad raporlarının tek hunisi" olarak tanımlıyor — o huniye ikinci 
    TCP'ye vermek saniyede ~250 çerçeve demek; LAN'da sorun değil ama
    `TCP_NODELAY` şart (istemci zaten açıyor). Değer değişmediğinde rapor
    göndermemek (BT tarafındaki gibi durum farkı) ağ trafiğini ciddi düşürür.
+
+4. **Boşta kalp atışı — dokunmayın.** Host, el sıkışmadan sonra sokete 10
+   saniyelik okuma zaman aşımı koyuyor. `WifiGamepadClient` bunu kendi
+   içinde çözüyor: 2 saniyeden uzun sessizlikte son raporu tekrarlıyor
+   (`heartbeatMs`, varsayılan 2000). Kapatmayın — kullanıcı telefonu bırakıp
+   10 saniye dokunmazsa bağlantı düşer ve bunu ancak bir sonraki
+   gönderimde öğrenirsiniz. Gerileme testi:
+   `bosta kalan baglanti kalp atisiyla canli kalir`.
 
 ---
 

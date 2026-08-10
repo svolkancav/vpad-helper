@@ -139,6 +139,29 @@ class PayloadTests(unittest.TestCase):
                 with self.assertRaises(p.PairingError):
                     p.parse_payload(payload)
 
+    def test_unicode_digits_rejected_like_kotlin(self):
+        """GERİLEME: `str.isdigit()` Unicode rakamlarını kabul ediyordu.
+
+        `'٨٠'.isdigit()` True ve `int('٨٠')` 80 verir. Kotlin ayrıştırıcısı
+        ASCII dışını reddettiği için aynı payload iki tarafta farklı sonuç
+        veriyordu — protokolde kabul edilemez bir ayrışma.
+        """
+        arabic_80 = "٨٠"   # ٨٠
+        arabic_1 = "١"          # ١
+        self.assertTrue(arabic_80.isdigit(), "test öncülü değişti")
+
+        with self.assertRaises(p.PairingError):
+            p.parse_payload(f"vpad://192.168.1.1:{arabic_80}?t={self.token_hex}&v=1")
+        with self.assertRaises(p.PairingError):
+            p.parse_payload(f"vpad://192.168.1.1:80?t={self.token_hex}&v={arabic_1}")
+
+    def test_ascii_digit_helper(self):
+        for good in ["0", "80", "65535", "000"]:
+            self.assertTrue(p._is_ascii_digits(good), f"{good!r} kabul edilmeliydi")
+        for bad in ["", " ", "8 0", "+8", "-8", "8.0", "0x50",
+                    "٨٠", "８０"]:  # Arapça-Hint, tam genişlik
+            self.assertFalse(p._is_ascii_digits(bad), f"{bad!r} reddedilmeliydi")
+
     def test_parse_tolerates_unknown_extra_param(self):
         """İleri uyumluluk: bilinmeyen anahtar payload'ı geçersiz kılmaz."""
         text = f"vpad://10.0.0.5:9000?t={self.token_hex}&v=1&name=Studio"

@@ -19,14 +19,14 @@ import java.net.SocketTimeoutException
  *
  * ## İş parçacığı sözleşmesi
  *
- * Bu sınıf **senkron ve tek iş parçacıklıdır**. [connect] ve [sendReport]
- * bloklar; çağıranın bunları ana iş parçacığından ÇAĞIRMAMASI gerekir
- * (Android'de `NetworkOnMainThreadException` alırsınız — bu bilinçli, sessiz
- * ANR yerine gürültülü hata). Entegrasyonda bir coroutine veya
- * `HandlerThread` üzerinden sürülür; bkz. `INTEGRATION.md`.
+ * [connect] ve [sendReport] **bloklar**; çağıranın bunları ana iş
+ * parçacığından ÇAĞIRMAMASI gerekir (Android'de `NetworkOnMainThreadException`
+ * alırsınız — bu bilinçli, sessiz ANR yerine gürültülü hata). Entegrasyonda
+ * bir coroutine veya `HandlerThread` üzerinden sürülür.
  *
- * [close] herhangi bir iş parçacığından çağrılabilir: soketi kapatır ve
- * bekleyen okumayı `SocketException` ile düşürür.
+ * Tüm yazmalar [writeLock] üzerinden serileştirilir, yani [close] ve
+ * [sendReport] farklı iş parçacıklarından çağrılsa bile tel bozulmaz. Okuma
+ * hâlâ tek iş parçacıklıdır: [ping] ile [connect] aynı anda çalıştırılmamalı.
  */
 class WifiGamepadClient(
     private val deviceName: String,
@@ -37,10 +37,31 @@ class WifiGamepadClient(
     private var socket: Socket? = null
     private var input: InputStream? = null
     private var output: OutputStream? = null
-    private val decoder = WifiFrameCodec.Decoder()
+
+    /**
+     * Her bağlantı için YENİ çözücü.
+     *
+     * `val` değil `var`: aynı nesne yeniden bağlanırsa önceki bağlantıdan
+     * kalan yarım çerçeve baytları yeni akışa karışırdı.
+     */
+    private var decoder = WifiFrameCodec.Decoder()
     private val readBuffer = ByteArray(4096)
 
+    /** Yazmaları serileştirir — bkz. sınıf KDoc'undaki iş parçacığı sözleşmesi. */
+    private val writeLock = Any()
+
+    @Volatile
+    private var lastWriteAtMs: Long = 0L
+
+    /** Kalp atışının tekrarlayacağı son rapor. */
+    @Volatile
+    private var lastReportFrame: ByteArray? = null
+
+    @Volatile
+    private var heartbeat: Thread? = null
+
     /** Eşleşme kapısından geçildi mi (false = eşleşmesiz mod). */
+    @Volatile
     var paired: Boolean = false
         private set
 
@@ -72,6 +93,7 @@ class WifiGamepadClient(
      *
      * İki tarafın da birbirini beklediği kilitlenme böylece imkânsız.
      *
+     * @param heartbeatMs boşta kalp atışı aralığı; 0 → kapalı (bkz. [sendReport]).
      * @throws WifiRejectedException host açıkça reddetti
      * @throws WifiProtocolException tel üzerinde beklenmeyen şey
      * @throws IOException ağ hatası
@@ -82,7 +104,14 @@ class WifiGamepadClient(
         connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
         readTimeoutMs: Int = DEFAULT_READ_TIMEOUT_MS,
         pairWaitMs: Int = DEFAULT_PAIR_WAIT_MS,
+        heartbeatMs: Long = DEFAULT_HEARTBEAT_MS,
     ) {
+        // Aynı nesne yeniden kullanılabilsin: önceki bağlantının artıkları
+        // yeni akışa sızmamalı.
+        decoder = WifiFrameCodec.Decoder()
+        paired = false
+        lastReportFrame = null
+
         emit(WifiConnectionState.Connecting(info.host, info.port))
 
         val sock = Socket()
@@ -136,6 +165,12 @@ class WifiGamepadClient(
                 )
             }
 
+            // Bağlantı kurulur kurulmaz nötr durumdayız. Kalp atışının
+            // tekrarlayacak bir şeyi olsun diye başlangıç değeri budur —
+            // aksi hâlde bağlanıp hiçbir tuşa dokunmayan kullanıcının
+            // bağlantısı yine 10 saniyede düşerdi.
+            lastReportFrame = WifiFrameCodec.encodeReport()
+            if (heartbeatMs > 0) startHeartbeat(heartbeatMs)
             emit(WifiConnectionState.Connected(info.host, info.port, paired))
         } catch (e: WifiRejectedException) {
             closeQuietly()
@@ -165,7 +200,9 @@ class WifiGamepadClient(
         lt: Int = 0,
         rt: Int = 0,
     ) {
-        write(WifiFrameCodec.encodeReport(buttons, hat, lx, ly, rx, ry, lt, rt))
+        val frame = WifiFrameCodec.encodeReport(buttons, hat, lx, ly, rx, ry, lt, rt)
+        lastReportFrame = frame
+        write(frame)
     }
 
     /**
@@ -178,7 +215,13 @@ class WifiGamepadClient(
     @Throws(IOException::class)
     fun sendNeutral() = sendReport()
 
-    /** PING gönderir ve PONG bekler. */
+    /**
+     * PING gönderir ve PONG bekler.
+     *
+     * Boşta kalp atışı için bunu KULLANMAYIN — her PING bir PONG üretir ve
+     * onu okuyan olmazsa alım tamponunda birikir. Kalp atışı bunun yerine son
+     * raporu tekrarlar; bkz. [startHeartbeat].
+     */
     @Throws(IOException::class)
     fun ping() {
         write(WifiFrameCodec.encodeFrame(WifiFrameCodec.T_PING))
@@ -193,6 +236,7 @@ class WifiGamepadClient(
     /** Nötr rapor + BYE gönderip soketi kapatır. Hata yutulur. */
     fun close() {
         if (socket == null) return
+        stopHeartbeat()
         try {
             sendNeutral()
             write(WifiFrameCodec.encodeFrame(WifiFrameCodec.T_BYE))
@@ -205,7 +249,61 @@ class WifiGamepadClient(
         }
     }
 
+    // ── Kalp atışı ──────────────────────────────────────────────────
+
+    /**
+     * Boşta kalan bağlantıyı canlı tutar.
+     *
+     * **Neden gerekli:** host, el sıkışmadan sonra sokete 10 saniyelik okuma
+     * zaman aşımı koyuyor (`vpad_daemon.py`: "PING every 2 s when idle").
+     * Kullanıcı telefonu bırakıp 10 saniye hiçbir tuşa dokunmazsa host
+     * bağlantıyı düşürür ve bunu istemci ancak bir sonraki gönderimde,
+     * `ConnectionAbortedError` ile öğrenir. Yani "oyunu duraklattım, geri
+     * döndüm, kumanda ölmüş" hatası.
+     *
+     * **Neden PING değil de son raporun tekrarı:** her PING bir PONG üretir;
+     * kalp atışı iş parçacığı okuma yapmadığı için o PONG'lar alım tamponunda
+     * birikirdi. Raporun tekrarı yanıt istemez, protokole birebir uygundur ve
+     * host'un durum görüntüsünü de tazeler. Bluetooth tarafındaki
+     * `MaxConnectionModeController` keepalive'ı da aynı deseni kullanıyor.
+     *
+     * Trafik akarken sessizdir: son yazmanın üzerinden [intervalMs] geçmediyse
+     * hiçbir şey göndermez.
+     */
+    private fun startHeartbeat(intervalMs: Long) {
+        stopHeartbeat()
+        val thread = Thread({
+            try {
+                while (!Thread.currentThread().isInterrupted && socket != null) {
+                    Thread.sleep(intervalMs / 2)
+                    val frame = lastReportFrame ?: continue
+                    val idleFor = System.currentTimeMillis() - lastWriteAtMs
+                    if (idleFor >= intervalMs) {
+                        write(frame)
+                    }
+                }
+            } catch (_: InterruptedException) {
+                // close() istedi; sessizce çık.
+            } catch (_: IOException) {
+                // Bağlantı zaten kopmuş. Hatayı burada yükseltmenin anlamı
+                // yok — çağıranın bir sonraki gönderimi aynı hatayı
+                // görecek ve durumu oradan yönetecek.
+            }
+        }, "vpad-wifi-heartbeat")
+        thread.isDaemon = true
+        heartbeat = thread
+        thread.start()
+    }
+
+    private fun stopHeartbeat() {
+        heartbeat?.interrupt()
+        heartbeat = null
+    }
+
+    // ── İç yardımcılar ──────────────────────────────────────────────
+
     private fun closeQuietly() {
+        stopHeartbeat()
         try {
             socket?.close()
         } catch (_: IOException) {
@@ -217,9 +315,14 @@ class WifiGamepadClient(
 
     @Throws(IOException::class)
     private fun write(bytes: ByteArray) {
-        val out = output ?: throw WifiProtocolException("bağlantı yok")
-        out.write(bytes)
-        out.flush()
+        // Kalp atışı iş parçacığı ile çağıranın yazması araya girmemeli:
+        // yarım yazılmış iki çerçeve teli bozar.
+        synchronized(writeLock) {
+            val out = output ?: throw WifiProtocolException("bağlantı yok")
+            out.write(bytes)
+            out.flush()
+            lastWriteAtMs = System.currentTimeMillis()
+        }
     }
 
     /** Bir tam çerçeve okunana kadar bekler. */
@@ -251,7 +354,7 @@ class WifiGamepadClient(
         /**
          * Bağlantı kurulduktan sonraki okuma zaman aşımı.
          *
-         * Host boştayken 2 sn'de bir PING beklendiği için 10 sn hem onu hem
+         * Host boştayken 2 sn'de bir trafik beklendiği için 10 sn hem onu hem
          * bir WiFi kesintisini rahat karşılar.
          */
         const val DEFAULT_READ_TIMEOUT_MS = 10_000
@@ -263,6 +366,14 @@ class WifiGamepadClient(
          * bekler. LAN'da CHALLENGE tek RTT'de gelir, 2 sn fazlasıyla yeterli.
          */
         const val DEFAULT_PAIR_WAIT_MS = 2_000
+
+        /**
+         * Boşta kalp atışı aralığı.
+         *
+         * Host'un 10 sn'lik zaman aşımına karşı 2 sn: bir atış kaybolsa bile
+         * dört şans daha var.
+         */
+        const val DEFAULT_HEARTBEAT_MS = 2_000L
     }
 }
 

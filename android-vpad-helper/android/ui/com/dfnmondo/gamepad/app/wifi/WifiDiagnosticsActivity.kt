@@ -50,6 +50,12 @@ class WifiDiagnosticsActivity : ComponentActivity() {
     private lateinit var net: Handler
     private val ui = Handler(Looper.getMainLooper())
 
+    /**
+     * `@Volatile`: yazan taraf ağ iş parçacığı ([net]), okuyan taraf düğme
+     * dinleyicileri (ana iş parçacığı). Volatile olmadan ana iş parçacığı
+     * bayat bir referans — hatta yarım yayınlanmış bir nesne — görebilir.
+     */
+    @Volatile
     private var client: WifiGamepadClient? = null
 
     /**

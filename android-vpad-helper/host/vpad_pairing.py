@@ -79,6 +79,19 @@ class PairingError(ValueError):
     """Geçersiz veya düşmanca eşleşme verisi."""
 
 
+def _is_ascii_digits(text: str) -> bool:
+    """Yalnızca ASCII 0-9 mu?
+
+    `str.isdigit()` KULLANILAMAZ: Unicode rakamlarını da kabul eder —
+    `'٨٠'.isdigit()` True döner ve `int('٨٠')` 80 verir. Kotlin tarafındaki
+    ayrıştırıcı ise ASCII dışını reddediyor, yani `isdigit()` iki uygulamayı
+    ayrıştırırdı: `vpad://192.168.1.1:٨٠?...` Python'da geçer, telefonda
+    geçmezdi. Aynı payload'ın iki tarafta farklı sonuç vermesi, protokolde
+    kabul edilebilir bir şey değil.
+    """
+    return text != "" and all("0" <= ch <= "9" for ch in text)
+
+
 # ── Token ────────────────────────────────────────────────────────────
 
 def generate_token() -> bytes:
@@ -175,9 +188,8 @@ def parse_payload(text: str) -> PairingInfo:
     host, _, port_text = authority.rpartition(":")
     if not host:
         raise PairingError("adres boş")
-    if not port_text.isdigit():
-        # isdigit(): "+80", " 80", "0x50" ve unicode rakamları elemek için
-        # int() yerine bu. int("٨٠") Arapça rakamları kabul eder.
+    if not _is_ascii_digits(port_text):
+        # "+80", " 80", "0x50" ve Unicode rakamları burada elenir.
         raise PairingError(f"port sayı değil: {port_text!r}")
     port = int(port_text)
     if not 1 <= port <= 65535:
@@ -206,7 +218,7 @@ def parse_payload(text: str) -> PairingInfo:
     version_text = params.get("v")
     if version_text is None:
         raise PairingError("sürüm (v) yok")
-    if not version_text.isdigit() or int(version_text) != PAYLOAD_VERSION:
+    if not _is_ascii_digits(version_text) or int(version_text) != PAYLOAD_VERSION:
         raise PairingError(
             f"desteklenmeyen payload sürümü: {version_text!r} "
             f"(bu sürüm {PAYLOAD_VERSION})"

@@ -202,6 +202,103 @@ class WifiGamepadClientTest {
         assertTrue(h.reports.isEmpty())
     }
 
+    // ── Boşta kalp atışı (GERİLEME TESTİ) ───────────────────────────
+
+    @Test
+    fun `bosta kalan baglanti kalp atisiyla canli kalir`() {
+        // GERİLEME: host, el sıkışmadan sonra sokete 10 sn okuma zaman aşımı
+        // koyuyor ("PING every 2 s when idle"). Kalp atışı olmadan, kullanıcı
+        // telefonu bırakıp 10 sn dokunmayınca host bağlantıyı düşürüyordu ve
+        // istemci bunu ancak bir sonraki gönderimde öğreniyordu.
+        val token = PairingCrypto.randomToken()
+        val h = host(token)
+        val client = WifiGamepadClient("Bosta Telefon")
+
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 120)
+        try {
+            // Hiçbir tuşa dokunulmuyor — yalnızca kalp atışı yazmalı.
+            assertTrue(
+                h.awaitReports(3, timeoutMs = 2_000),
+                "boşta kalp atışı gitmedi: ${h.reports.size} rapor geldi",
+            )
+            // Gelenlerin hepsi nötr olmalı (tuş basılı sanılmasın).
+            h.reports.toList().forEach { r ->
+                assertEquals(0, r[0].toInt() and 0xFF, "kalp atışı nötr değil")
+                assertEquals(
+                    WifiFrameCodec.HAT_CENTER,
+                    (r[1].toInt() and 0xFF) ushr 4,
+                )
+            }
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `kalp atisi gercek trafik akarken sessiz kalir`() {
+        val token = PairingCrypto.randomToken()
+        val h = host(token)
+        val client = WifiGamepadClient("Aktif Telefon")
+
+        // Aralık uzun: bu süre içinde kalp atışı hiç devreye girmemeli.
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 5_000)
+        try {
+            repeat(5) { client.sendReport(buttons = 0x0001) }
+            assertTrue(h.awaitReports(5))
+            Thread.sleep(200)
+            assertEquals(
+                5, h.reports.size,
+                "kalp atışı trafik akarken fazladan çerçeve yolladı",
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `kalp atisi kapatilabilir`() {
+        val token = PairingCrypto.randomToken()
+        val h = host(token)
+        val client = WifiGamepadClient("Atissiz")
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+        try {
+            Thread.sleep(250)
+            assertTrue(h.reports.isEmpty(), "heartbeatMs=0 iken çerçeve gitti")
+        } finally {
+            client.close()
+        }
+    }
+
+    // ── Yeniden kullanım (GERİLEME TESTİ) ───────────────────────────
+
+    @Test
+    fun `ayni nesne yeniden baglanabilir`() {
+        // GERİLEME: `decoder` ve `paired` connect() içinde sıfırlanmıyordu.
+        // Önceki bağlantıdan kalan yarım çerçeve baytları yeni akışa
+        // karışabilir, `paired` bayrağı yanlış kalabilirdi.
+        val token = PairingCrypto.randomToken()
+        val paired = host(token)
+        val open = host(null)
+        val client = WifiGamepadClient("Tekrar Kullanilan")
+
+        client.connect(paired.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+        assertTrue(client.paired)
+        client.sendReport(buttons = 0x0001)
+        assertTrue(paired.awaitReports(1))
+        client.close()
+
+        // İkinci bağlantı eşleşmesiz bir host'a: `paired` false'a dönmeli
+        client.connect(open.info(PairingCrypto.randomToken()),
+            pairWaitMs = 300, heartbeatMs = 0)
+        assertFalse(client.paired, "önceki bağlantının paired bayrağı kaldı")
+        client.sendReport(buttons = 0x0002)
+        assertTrue(open.awaitReports(1))
+        client.close()
+
+        assertTrue(paired.errors.isEmpty(), "1. host hata gördü: ${paired.errors}")
+        assertTrue(open.errors.isEmpty(), "2. host hata gördü: ${open.errors}")
+    }
+
     // ── Geriye uyum ─────────────────────────────────────────────────
 
     @Test
