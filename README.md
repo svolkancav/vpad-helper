@@ -8,7 +8,9 @@ gamepad for your computer.
 
 **[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.exe)** — one file, no installer, lives in the system tray.
 
-**[⬇ Download for macOS](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.macOS.zip)** — signed and notarised by Apple, so it opens without a Gatekeeper detour. Unzip and run; it lives in the menu bar.
+**[⬇ Download for macOS](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad-Helper.dmg)** — signed and notarised by Apple, so it opens without a Gatekeeper detour. Open the disk image and **drag the app into Applications**, then launch it from there; it lives in the menu bar.
+
+> **Drag it to Applications — this is not optional.** Launched from `~/Downloads`, macOS runs the app *translocated*: from a randomised read-only copy. Permissions you grant are recorded against the path you granted them for, so an Accessibility grant given to the copy in Downloads does not apply to the copy that is actually running, and input is discarded with no error anywhere.
 
 ---
 
