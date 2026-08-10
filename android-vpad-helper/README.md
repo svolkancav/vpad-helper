@@ -64,8 +64,8 @@ android-vpad-helper/
 │   ├── core/                  ── saf JVM: jvm-verify'da DERLENİR ve TEST EDİLİR
 │   │   └── …/wifi/PairingPayload · PairingCrypto · WifiFrameCodec
 │   │             · WifiGamepadClient · WifiConnectionState
-│   ├── ui/                    ── Android'e özgü: ancak uygulama içinde derlenir
-│   │   └── …/wifi/QrScanActivity · WifiDiagnosticsActivity
+│   ├── ui/                    ── Android'e özgü: AGP ile derlendi, testi yok
+│   │   └── …/wifi/CodeScannerPairing · WifiDiagnosticsActivity
 │   └── INTEGRATION.md         gamepad_universal'a bağlama kılavuzu
 └── jvm-verify/                Kotlin çekirdeğini derleyip test eden Gradle projesi
 ```
@@ -133,9 +133,14 @@ dene → ancak sonra rapor hunisini bağla.
 | Host uçtan uca (gerçek soket) | ✅ 9 test |
 | Kotlin çekirdek | ✅ 45 test, gerçek soket dahil |
 | Python ↔ Kotlin protokol sözleşmesi | ✅ altın vektör (aynı HMAC baytları) |
-| QR tarama ekranı | ❌ **derlenmedi** — CameraX + ML Kit gerektirir |
+| Android tarafı (`ui/`) | ✅ **derlendi** — AGP 8.13.2, SDK 36, minSdk 31 |
 | Gerçek telefon → gerçek host | ❌ **denenmedi** — fiziksel cihaz gerekir |
 
-Yani protokolün doğruluğu kanıtlanmış durumda; kanıtlanmamış olan kamera
-boru hattı ve gerçek cihaz davranışı. `WifiDiagnosticsActivity` tam olarak o
-boşluğu kapatmak için var.
+Yani protokolün doğruluğu kanıtlanmış, Android kodu derleniyor; kanıtlanmamış
+olan yalnızca gerçek cihaz davranışı — kamera taraması, izin akışı, gerçek ağ
+üzerinde gecikme. `WifiDiagnosticsActivity` tam olarak o boşluğu kapatmak için
+var.
+
+Not: `ui/` altındaki iki dosyanın **birim testi yok**. `core/` bilinçli olarak
+Android'den arındırıldığı için test edilebiliyor; `ui/` ise kamera ve Activity
+yaşam döngüsüne bağlı, orada değer üretecek test ancak cihaz üstünde koşar.

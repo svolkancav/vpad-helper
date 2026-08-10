@@ -21,8 +21,8 @@ android/app/src/main/kotlin/com/dfnmondo/gamepad/app/wifi/
 ├── WifiFrameCodec.kt        ← core/  (test edildi)
 ├── WifiGamepadClient.kt     ← core/  (test edildi)
 ├── WifiConnectionState.kt   ← core/  (test edildi)
-├── QrScanActivity.kt        ← ui/    (Android'e özgü)
-└── WifiDiagnosticsActivity.kt ← ui/  (Android'e özgü, opsiyonel)
+├── CodeScannerPairing.kt    ← ui/    (QR tarama — Android'e özgü)
+└── WifiDiagnosticsActivity.kt ← ui/  (tanı ekranı, yalnız debug)
 ```
 
 `core/` dosyalarını **değiştirmeden** kopyalayın. Değiştirmeniz gerekirse
@@ -31,7 +31,11 @@ tek güvencesi bu.
 
 ---
 
-## 2. QR tarayıcı seçimi — önce bunu kararlaştırın
+## 2. QR tarayıcı — karar ve gerekçesi
+
+**Karar: `play-services-code-scanner`.** Diğer seçenekler için yazılmış kod
+(CameraX + ML Kit, ZXing) bilinçli olarak depodan çıkarıldı; aşağıdaki
+karşılaştırma kararın gerekçesi olarak duruyor.
 
 Bu proje APK boyutuna duyarlı (Unity Ads 4,08 MB yüzünden çıkarılmıştı), o
 yüzden aşağıdaki rakamlar **tahmin değil, ölçüm**: Maven'daki artefaktların
@@ -58,134 +62,113 @@ classes.jar            388 KB
 **Bu, projeden çıkarılan Unity Ads'ten (4,08 MB) daha büyük.** Aynı gerekçeyle
 elenmesi tutarlı olur.
 
-### Öneri
+### Neden code-scanner
 
-- **Varsayılan: `play-services-code-scanner`.** 315 KB, kamera izni istemez
-  (tarama arayüzü Play services sürecinde çalışır), model talep üzerine iner.
-  Play Store'a dağıtılan bir uygulama için açık ara en iyi denge. Ayrıca
-  `play-services-base`/`basement` bağımlılıkları AdMob üzerinden zaten
-  projede — yani gerçek marjinal maliyet 315 KB'den de az.
-- **GMS'siz cihaz veya çevrimdışı ilk tarama gerekiyorsa: ZXing.** 742 KB ile
-  paket içi ML Kit'in **onda biri**. Karşılığında tarama motoru daha zayıf
-  (düşük ışık ve eğik açıda ML Kit belirgin üstün) ve `zxing-android-embedded`
-  eski kamera yığınını kullanır.
-- **Paket içi ML Kit'i yalnızca** hem GMS'siz cihaz hem de en iyi tarama
-  kalitesi aynı anda şartsa seçin. 7,6 MB'ı ödemeye değer mi, ürün kararı.
+315 KB ile en küçüğü ve **kamera izni istemeyen tek seçenek**. Sebep, tarama
+işinin sizin sürecinizde olmaması: `startScan()` çağrısı Binder üzerinden
+Google Play services'e gidiyor, kamerayı **o** kendi izniyle açıyor, kareleri
+kendi belleğinde çözüyor ve size yalnızca sonuç metnini döndürüyor. Android
+izinleri UID başına verildiği için uygulamanın izne ihtiyacı kalmıyor —
+`ACTION_IMAGE_CAPTURE` ile fotoğraf çektirmenin aynısı.
 
-`ui/QrScanActivity.kt` **CameraX yolları** içindir (seçenek 3 ve 4). Birinci
-seçenekte o dosyaya hiç ihtiyacınız yok; ZXing'de de kendi `CaptureActivity`'si
-gelir. Her iki durumda da tek yapmanız gereken, okunan ham metni doğrulamaktan
-ibaret:
+Ayrıca `play-services-base`/`basement` bağımlılıkları AdMob üzerinden zaten
+projede, yani gerçek marjinal maliyet 315 KB'den de az. Uygulama zaten GMS'e
+bağımlı (AdMob + RevenueCat Play services olmadan çalışmaz), dolayısıyla
+ZXing'in "GMS gerektirmez" avantajının bu projede karşılığı yok.
 
-```kotlin
-// build.gradle.kts
-implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
-```
+### Kabul edilen iki bedel
 
-```kotlin
-// Çağıran yer — kamera izni YOK, kendi ekranınız YOK
-GmsBarcodeScanning.getClient(
-    context,
-    GmsBarcodeScannerOptions.Builder()
-        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-        .build(),
-).startScan()
-    .addOnSuccessListener { barcode ->
-        val raw = barcode.rawValue ?: return@addOnSuccessListener
-        // Doğrulama HER ZAMAN buradan geçer — tarayıcı hangisi olursa olsun.
-        val info = try {
-            PairingPayload.parse(raw)
-        } catch (e: PairingException) {
-            showError(e.message); return@addOnSuccessListener
-        }
-        connectOverWifi(info)
-    }
-    .addOnFailureListener { showError(it.message) }
-```
+**1. Tarama ekranı Google'ın.** Sizin tasarımınız, metinleriniz ve 13 dilde
+çevirileriniz orada geçmez; Play services kendi arayüzünü ve kendi
+yerelleştirmesini kullanır. Eşleşme akışının uygulamanın geri kalanı gibi
+görünmesi bir gün öncelik olursa, karar CameraX veya ZXing lehine
+değiştirilmeli — ikisinde de kamera sizin sürecinizde çalışır ve ekranın
+tamamı sizindir.
 
-**Kritik nokta:** tarayıcı hangisi olursa olsun ham metin daima
-`PairingPayload.parse` üzerinden geçmelidir. LAN kısıtı ve şema doğrulaması
-orada; tarayıcının kendisi hiçbir güvenlik sağlamaz.
+**2. Tarama tek atışlık.** Geçersiz QR okunduğunda Play services ekranı
+kapanır ve sonuç `Result.Rejected` olarak döner. "Ekran açık kalsın, sebep
+satır içinde yazsın" akışı mümkün değil — kullanıcıya mesajı gösterip **tek
+dokunuşla tekrar denenebilen** bir düğme bırakın.
+
+### İleriye dönük tuzak
+
+Uygulama `CAMERA` iznini **başka bir sebeple** manifest'e eklerse bu muafiyet
+kaybolur: Android, kullanıcının reddettiği bir izni vekil üzerinden aşmayı
+engeller, o yüzden "beyan edilmiş ama verilmemiş" durumunda devretme yolu da
+kapanır. Mevcut manifest'te `CAMERA` yok (doğrulandı). İleride kamera
+gerektiren bir özellik eklenirse burası yeniden değerlendirilmeli;
+`CodeScannerPairing` bu durumu `CODE_SCANNER_CAMERA_PERMISSION_NOT_GRANTED`
+dalıyla ele alıyor ve sebebi mesajda söylüyor.
+
+### Değişmeyen kural
+
+Tarayıcı hangisi olursa olsun ham metin **daima** `PairingPayload.parse`
+üzerinden geçer. LAN kısıtı ve şema doğrulaması orada; tarayıcı kütüphanesi
+hiçbir güvenlik sağlamaz, yalnızca metin getirir.
 
 ---
 
 ## 3. Gradle bağımlılıkları
 
-`android/app/build.gradle.kts` → `dependencies` bloğuna.
-
-**Seçenek 1 (önerilen — code scanner):**
+`android/app/build.gradle.kts` → `dependencies` bloğuna **tek satır**:
 
 ```kotlin
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 ```
 
-**Seçenek 2 (ZXing — Play Services gerektirmez):**
-
-```kotlin
-    implementation("com.google.zxing:core:3.5.3")
-    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
-```
-
-Kendi `CaptureActivity`'si vardır; `QrScanActivity.kt`'ye gerek kalmaz.
-Doğrulama yine `PairingPayload.parse` üzerinden geçer.
-
-**Seçenek 3/4 (CameraX + ML Kit, `QrScanActivity.kt` kullanılacaksa):**
-
-```kotlin
-    val cameraX = "1.4.2"
-    implementation("androidx.camera:camera-core:$cameraX")
-    implementation("androidx.camera:camera-camera2:$cameraX")
-    implementation("androidx.camera:camera-lifecycle:$cameraX")
-    implementation("androidx.camera:camera-view:$cameraX")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
-    // QrScanActivity ComponentActivity + ActivityResult API kullanıyor
-    implementation("androidx.activity:activity-ktx:1.9.3")
-```
+Hepsi bu. Doğrulandı: yedi dosyanın tamamı yalnızca bu bağımlılıkla (artı
+projede zaten bulunan `androidx.core:core-ktx` ve `androidx.activity:activity-ktx`)
+AGP 8.13.2 / compileSdk 36 / minSdk 31 / Java 17 altında derleniyor. CameraX,
+ML Kit ve ZXing'e ihtiyaç **yok**.
 
 `core/` dosyaları **hiçbir ek bağımlılık istemez** — `javax.crypto` ve
-`java.net` JDK'da. Yani eşleşme mantığı APK'ya sıfır bayt bağımlılık ekler.
-
-Mevcut `minSdk = 31` ve `compileSdk = 36` bu sürümlerle uyumlu; Java 17
-hedefi de yeterli.
+`java.net` JDK'da. Yani eşleşme mantığı APK'ya sıfır bayt bağımlılık ekler;
+315 KB'ın tamamı tarayıcıdan geliyor.
 
 ---
 
 ## 4. Manifest
 
-`android/app/src/main/AndroidManifest.xml`:
+Sürüm derlemesi için `android/app/src/main/AndroidManifest.xml`'e eklenecek
+**tek satır**:
 
 ```xml
     <!-- Aynı WiFi ağındaki host'a TCP bağlantısı -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- YALNIZCA Seçenek 2'de (kendi kamera ekranınız) gerekir.
-         play-services-code-scanner kullanıyorsanız BU SATIRI EKLEMEYİN —
-         gereksiz izin, mağaza incelemesinde açıklama ister. -->
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 ```
 
-`<application>` içine (yalnızca kullandıklarınızı):
+Eklenmeyecekler ve sebepleri:
+
+| | |
+|---|---|
+| `CAMERA` | **eklemeyin** — kamera Play services sürecinde açılır. Eklemek muafiyeti bozar (bkz. §2 "tuzak"). |
+| Tarama Activity kaydı | gerekmez — ekran bizim değil |
+| `ACCESS_NETWORK_STATE` | zaten birleşik manifest'te |
+
+> **`INTERNET` neden yine de açıkça yazılmalı.** Birleşik manifest'te
+> `INTERNET` ve `ACCESS_NETWORK_STATE` **zaten var** — AdMob'un kütüphane
+> manifest'inden geliyor (doğrulandı). Yani teknik olarak eklemeseniz de
+> çalışır. Ama o zaman WiFi özelliğinin izni AdMob'un varlığına bağlı kalır;
+> reklamlar bir gün çıkarılırsa özellik sessizce ölür. Kullanıcıya görünen
+> hiçbir şey değişmiyor (kurulum zamanı izni, listede zaten var), o yüzden
+> açıkça beyan etmek bedavaya sağlamlık.
+
+Tanı ekranı **yalnızca debug**: `WifiDiagnosticsActivity` kaydını
+`src/debug/AndroidManifest.xml`'e koyun (o dosya projede zaten var), sürüm
+derlemesine hiç girmesin.
 
 ```xml
-        <activity
-            android:name=".wifi.QrScanActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
         <activity
             android:name=".wifi.WifiDiagnosticsActivity"
             android:exported="false" />
 ```
 
-`android:exported="false"` önemli: bu ekranların dışarıdan başlatılması için
-hiçbir sebep yok.
-
-> **Not:** `INTERNET` izni, uygulamanın gizlilik beyanını etkiler. Mevcut
-> "hiçbir yere veri göndermez" iddiası korunuyor — bağlantı yalnızca
-> kullanıcının kendi LAN'ındaki, QR ile kendi onayladığı makineye kuruluyor
-> ve `PairingPayload` genel IP'lere bağlanmayı zaten reddediyor. Play
-> Console'daki Veri Güvenliği formunda bunu böyle açıklamak yeterli.
+> **Gizlilik beyanı.** Mevcut "hiçbir yere veri göndermez" iddiası korunuyor:
+> bağlantı yalnızca kullanıcının kendi LAN'ındaki, QR ile kendi onayladığı
+> makineye kuruluyor ve `PairingPayload` genel IP'lere bağlanmayı zaten
+> reddediyor. Play Console'daki Veri Güvenliği formunda bunu böyle açıklamak
+> yeterli. Kamera verisi hiç toplanmıyor — tarama başka bir süreçte oluyor ve
+> uygulamaya yalnızca çözülmüş metin dönüyor.
 
 ---
 
@@ -281,9 +264,9 @@ bağlanabilir; iki durum modeli bilinçli olarak birleştirilmedi, gerekçesi
 
 `core/` sınıfları yansıma (reflection) kullanmaz, özel kural gerektirmez.
 
-`QrScanActivity` ve `WifiDiagnosticsActivity` manifest'te adlarıyla
-anıldıkları için R8 onları zaten korur. ML Kit ve CameraX kendi consumer
-kurallarını taşır.
+`CodeScannerPairing` bir `object` ve doğrudan çağrılıyor; `WifiDiagnosticsActivity`
+manifest'te adıyla anıldığı için R8 onu zaten korur. `play-services-code-scanner`
+kendi consumer kurallarını taşır.
 
 Tek dikkat: `WifiDiagnosticsActivity`'yi **sürüm derlemesine almayın** —
 tanı amaçlı bir ekran, son kullanıcıya gösterilmemeli. Manifest kaydını

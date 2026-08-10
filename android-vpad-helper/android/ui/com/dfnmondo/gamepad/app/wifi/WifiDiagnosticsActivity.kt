@@ -1,6 +1,5 @@
 package com.dfnmondo.gamepad.app.wifi
 
-import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -17,7 +16,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -54,15 +52,27 @@ class WifiDiagnosticsActivity : ComponentActivity() {
 
     private var client: WifiGamepadClient? = null
 
-    private val scanLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val payload = result.data?.getStringExtra(QrScanActivity.EXTRA_PAYLOAD)
-            if (payload != null) connect(payload) else log("QR sonucu boş geldi")
-        } else {
-            val error = result.data?.getStringExtra(QrScanActivity.EXTRA_ERROR)
-            log("tarama iptal edildi${if (error != null) " ($error)" else ""}")
+    /**
+     * Tarama sonucunu ele alır.
+     *
+     * `CodeScannerPairing` bir Activity başlatmadığı için `ActivityResult`
+     * sözleşmesi yok — sonuç doğrudan geri çağrıyla, ana iş parçacığında
+     * geliyor.
+     */
+    private fun startScan() {
+        CodeScannerPairing.scan(this) { result ->
+            when (result) {
+                is CodeScannerPairing.Result.Success -> connect(result.raw)
+                is CodeScannerPairing.Result.Rejected ->
+                    log("QR reddedildi (${result.userMessageKey}): ${result.detail}")
+                is CodeScannerPairing.Result.Cancelled ->
+                    log("tarama iptal edildi")
+                is CodeScannerPairing.Result.Unavailable ->
+                    log("tarayıcı modülü yok: ${result.detail} — internete " +
+                        "bağlanıp tekrar deneyin")
+                is CodeScannerPairing.Result.Failed ->
+                    log("tarama hatası: ${result.detail}")
+            }
         }
     }
 
@@ -73,10 +83,16 @@ class WifiDiagnosticsActivity : ComponentActivity() {
         setContentView(buildContentView())
         setActionsEnabled(false)
 
-        // Doğrudan payload ile de açılabilsin (adb ile test için):
+        // Modülü şimdiden indirt: kullanıcı eşleşmeye geldiğinde internetsiz
+        // bir LAN'da olabilir ve o an indirmek mümkün olmayabilir.
+        CodeScannerPairing.preWarm(this) { ok ->
+            log(if (ok) "tarayıcı modülü hazır" else "tarayıcı modülü indirilemedi")
+        }
+
+        // Doğrudan payload ile de açılabilsin (kamerasız/adb ile test için):
         //   adb shell am start -n <paket>/.wifi.WifiDiagnosticsActivity \
         //     -e vpad_payload "vpad://192.168.1.34:53124?t=...&v=1"
-        val direct = intent?.getStringExtra(QrScanActivity.EXTRA_PAYLOAD)
+        val direct = intent?.getStringExtra(CodeScannerPairing.EXTRA_PAYLOAD)
         if (direct != null) connect(direct) else log("Hazır. QR taramak için düğmeye basın.")
     }
 
@@ -99,7 +115,7 @@ class WifiDiagnosticsActivity : ComponentActivity() {
 
         root.addView(Button(this).apply {
             text = "QR tara ve eşleş"
-            setOnClickListener { scanLauncher.launch(QrScanActivity.intent(context)) }
+            setOnClickListener { startScan() }
         })
 
         actionRow = LinearLayout(this).apply {
@@ -251,5 +267,5 @@ class WifiDiagnosticsActivity : ComponentActivity() {
 /** Tanı ekranını açmak için hazır intent. */
 fun wifiDiagnosticsIntent(context: android.content.Context, payload: String? = null): Intent =
     Intent(context, WifiDiagnosticsActivity::class.java).apply {
-        if (payload != null) putExtra(QrScanActivity.EXTRA_PAYLOAD, payload)
+        if (payload != null) putExtra(CodeScannerPairing.EXTRA_PAYLOAD, payload)
     }

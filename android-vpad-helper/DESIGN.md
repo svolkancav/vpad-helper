@@ -215,7 +215,7 @@ android-vpad-helper/
 │   ├── WifiFrameCodec.kt           çerçeve encode/decode
 │   ├── WifiGamepadClient.kt        TCP istemci + el sıkışma + REPORT
 │   ├── WifiConnectionState.kt      durum modeli
-│   ├── QrScanActivity.kt           CameraX + ML Kit tarama ekranı (Android'e özgü)
+│   ├── CodeScannerPairing.kt       QR tarama (Play services code scanner)
 │   └── INTEGRATION.md              bağlama adımları
 └── jvm-verify/                     ── saf-JVM Gradle projesi: Kotlin çekirdeği
                                        gerçekten derler ve test eder
@@ -224,7 +224,8 @@ android-vpad-helper/
 **Kritik ayrım:** `PairingPayload`, `PairingCrypto`, `WifiFrameCodec`,
 `WifiGamepadClient` **hiçbir Android API'si kullanmaz** — yalnızca `java.*` ve Kotlin
 stdlib. Bu bilinçli: böylece bu makinede gerçekten derlenip test edilebiliyorlar.
-Android'e özgü tek dosya `QrScanActivity.kt`.
+Android'e özgü olanlar yalnızca `CodeScannerPairing.kt` (kamera) ve
+`WifiDiagnosticsActivity.kt` (tanı ekranı).
 
 ---
 
@@ -236,7 +237,8 @@ Android'e özgü tek dosya `QrScanActivity.kt`.
 | Host uçtan uca | gerçek soket + referans istemci | ✅ |
 | Kotlin çekirdek | saf-JVM Gradle projesinde derleme + test | ✅ |
 | **Protokol sözleşmesi** | **altın vektörler** — Python'un ürettiği MAC ve çerçeve baytları Kotlin testinde sabit olarak doğrulanır | ✅ |
-| QR tarama ekranı | CameraX + ML Kit gerektirir | ❌ derlenemez |
+| QR tarama katmanı | AGP + Android SDK ile derleme | ✅ derlendi |
+| Gerçek kamera ile tarama | Play services tarayıcısı, fiziksel cihaz | ❌ denenmedi |
 | Gerçek telefon → gerçek host | fiziksel cihaz | ❌ |
 
 Altın vektör yaklaşımı, iki ayrı dilde yazılmış iki tarafın birbirini gerçekten
