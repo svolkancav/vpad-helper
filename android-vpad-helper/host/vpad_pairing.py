@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""
+V-Pad eşleşme katmanı — QR ile kamera doğrulamalı WiFi eşleşmesi.
+
+Bu modül `vpad_daemon.py`'nin YANINA gelir; onu içe aktarmaz ve onun
+bağımlılıklarına (zeroconf, vgamepad) ihtiyaç duymaz. Sebep: eşleşme mantığı
+protokolün en güvenlik-kritik parçası ve her yerde — CI dahil, hiçbir şey
+kurulmadan — test edilebilmeli.
+
+Tasarımın tamamı ve gerekçeleri: ../DESIGN.md
+
+Üçüncü parti bağımlılık: YOK. Tek istisna `render_qr_terminal`, `qrcode`
+paketini TEMBEL içe aktarır ve yoksa metin geri düşüşü yapar — yani bu modülün
+hiçbir testi opsiyonel bir pakete bağlı değil.
+"""
+from __future__ import annotations
+
+import hmac
+import ipaddress
+import secrets
+import struct
+from dataclasses import dataclass
+from hashlib import sha256
+
+# ── Protokol sabitleri ───────────────────────────────────────────────
+#
+# Çerçeve biçimi vpad_daemon.py ile aynı: [u16 LE uzunluk][u8 tip][gövde].
+# Aşağıdakiler o dosyadaki tip tablosuna EKLENEN değerler; 0x20 ve üstü
+# bilinçli seçildi, mevcut 0x01..0x12 aralığıyla çakışmıyor.
+
+T_CHALLENGE = 0x20  # host → istemci: 16 bayt challenge
+T_AUTH = 0x21       # istemci → host: 16 bayt nonce + 32 bayt mac
+
+# vpad_daemon.py'deki karşılıkları — bu modül daemon'ı içe aktarmadığı için
+# burada da tanımlı. Değerler DEĞİŞTİRİLEMEZ, iki dosya aynı teli konuşuyor.
+T_HELLO = 0x01
+T_HELLO_ACK = 0x10
+T_REJECT = 0x11
+
+R_AUTH_REQUIRED = 0x04  # REJECT sebebi: eşleşme açık, AUTH gelmedi
+R_AUTH_FAILED = 0x05    # REJECT sebebi: MAC uyuşmadı
+
+MAX_FRAME = 4096  # vpad_daemon ile aynı
+
+SCHEME = "vpad://"
+PAYLOAD_VERSION = 1
+
+TOKEN_LEN = 16      # ham bayt (QR'da 32 hex karakter)
+CHALLENGE_LEN = 16
+NONCE_LEN = 16
+MAC_LEN = 32        # HMAC-SHA256 tam çıktısı
+AUTH_LEN = NONCE_LEN + MAC_LEN
+
+# Alan ayracı: aynı token ileride başka bir amaçla kullanılırsa MAC'ler
+# birbirine karışmasın. Sürüm de burada — şema değişirse eski MAC yeni
+# şemada geçerli olmaz.
+AUTH_LABEL = b"vpad-auth-v1"
+
+# Telefonun ve host'un kabul ettiği adres aralıkları. İkisi de AYNI listeyi
+# kullanır; Kotlin tarafındaki karşılığı PairingPayload.LAN_RANGES.
+#
+# Python'un `IPv4Address.is_private`'ı BİLEREK kullanılmadı: o özellik
+# 240/4, 198.18/15, 203.0.113/24 gibi "özel amaçlı ama LAN değil"
+# aralıkları da kapsıyor. Burada ne istediğimiz açıkça yazılı olsun.
+LAN_RANGES = tuple(
+    ipaddress.ip_network(c)
+    for c in (
+        "127.0.0.0/8",     # loopback
+        "10.0.0.0/8",      # RFC1918
+        "172.16.0.0/12",   # RFC1918
+        "192.168.0.0/16",  # RFC1918
+        "169.254.0.0/16",  # link-local (yönlendiricisiz ağ)
+        "100.64.0.0/10",   # operatör NAT (CGNAT)
+    )
+)
+
+
+class PairingError(ValueError):
+    """Geçersiz veya düşmanca eşleşme verisi."""
+
+
+# ── Token ────────────────────────────────────────────────────────────
+
+def generate_token() -> bytes:
+    """Kriptografik olarak güvenli 16 baytlık eşleşme token'ı.
+
+    `secrets` kullanılır, `random` DEĞİL: `random` Mersenne Twister'dır ve
+    birkaç çıktıdan durumu geri çıkarılabilir.
+    """
+    return secrets.token_bytes(TOKEN_LEN)
+
+
+def token_to_hex(token: bytes) -> str:
+    if len(token) != TOKEN_LEN:
+        raise PairingError(f"token {TOKEN_LEN} bayt olmalı, {len(token)} geldi")
+    return token.hex()
+
+
+def token_from_hex(text: str) -> bytes:
+    text = text.strip()
+    if len(text) != TOKEN_LEN * 2:
+        raise PairingError(f"token {TOKEN_LEN * 2} hex karakter olmalı")
+    try:
+        return bytes.fromhex(text)
+    except ValueError as exc:
+        raise PairingError(f"token hex değil: {exc}") from exc
+
+
+# ── Adres kuralı ─────────────────────────────────────────────────────
+
+def is_lan_ipv4(text: str) -> bool:
+    """Adres LAN aralıklarından birinde mi?
+
+    Yalnızca IPv4 literal kabul edilir. Alan adı verilirse False döner —
+    çözümleme YAPILMAZ, çünkü DNS'e sormak tam olarak kapatmak istediğimiz
+    kapıdır (kötü niyetli QR + DNS rebinding).
+    """
+    try:
+        addr = ipaddress.IPv4Address(text)
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+    return any(addr in net for net in LAN_RANGES)
+
+
+# ── QR payload ───────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class PairingInfo:
+    """Ayrıştırılmış ve DOĞRULANMIŞ eşleşme bilgisi."""
+    host: str
+    port: int
+    token: bytes
+
+    @property
+    def token_hex(self) -> str:
+        return self.token.hex()
+
+
+def build_payload(host: str, port: int, token: bytes) -> str:
+    """QR'a gömülecek metni kurar."""
+    if not is_lan_ipv4(host):
+        # Host kendi adresini yayınlıyor; LAN dışı bir adres yayınlamak
+        # telefona reddedeceği bir QR göstermek olurdu.
+        raise PairingError(f"LAN dışı adres yayınlanamaz: {host}")
+    if not 1 <= port <= 65535:
+        raise PairingError(f"geçersiz port: {port}")
+    return f"{SCHEME}{host}:{port}?t={token_to_hex(token)}&v={PAYLOAD_VERSION}"
+
+
+def parse_payload(text: str) -> PairingInfo:
+    """QR'dan okunan metni ayrıştırır ve doğrular.
+
+    Bu fonksiyon DÜŞMANCA girdi alır: kullanıcı herhangi bir QR kodunu
+    tarayabilir. Her adım açıkça reddeder; hiçbir yerde "makul varsayım"
+    yapılmaz.
+
+    Kotlin tarafındaki `PairingPayload.parse` bunun birebir karşılığıdır;
+    ikisi aynı vakalarla test edilir.
+    """
+    if not isinstance(text, str):
+        raise PairingError("payload metin değil")
+    text = text.strip()
+
+    if not text.startswith(SCHEME):
+        raise PairingError("şema vpad:// değil")
+    body = text[len(SCHEME):]
+
+    if "?" not in body:
+        raise PairingError("sorgu bölümü yok")
+    authority, query = body.split("?", 1)
+
+    # --- adres:port ---
+    if ":" not in authority:
+        raise PairingError("port yok")
+    host, _, port_text = authority.rpartition(":")
+    if not host:
+        raise PairingError("adres boş")
+    if not port_text.isdigit():
+        # isdigit(): "+80", " 80", "0x50" ve unicode rakamları elemek için
+        # int() yerine bu. int("٨٠") Arapça rakamları kabul eder.
+        raise PairingError(f"port sayı değil: {port_text!r}")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise PairingError(f"port aralık dışı: {port}")
+
+    if not is_lan_ipv4(host):
+        raise PairingError(
+            f"adres LAN değil veya IPv4 literal değil: {host!r} — "
+            "kötü niyetli QR olabilir"
+        )
+
+    # --- sorgu parametreleri ---
+    params: dict[str, str] = {}
+    for part in query.split("&"):
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        if not sep:
+            raise PairingError(f"biçimsiz sorgu parçası: {part!r}")
+        if key in params:
+            # Yinelenen anahtar: hangi değerin geçerli olduğu belirsiz.
+            # Belirsizliği kabul etmek yerine reddet.
+            raise PairingError(f"yinelenen sorgu anahtarı: {key!r}")
+        params[key] = value
+
+    version_text = params.get("v")
+    if version_text is None:
+        raise PairingError("sürüm (v) yok")
+    if not version_text.isdigit() or int(version_text) != PAYLOAD_VERSION:
+        raise PairingError(
+            f"desteklenmeyen payload sürümü: {version_text!r} "
+            f"(bu sürüm {PAYLOAD_VERSION})"
+        )
+
+    token_text = params.get("t")
+    if token_text is None:
+        raise PairingError("token (t) yok")
+    token = token_from_hex(token_text)
+
+    return PairingInfo(host=host, port=port, token=token)
+
+
+# ── Challenge-response ───────────────────────────────────────────────
+
+def make_challenge() -> bytes:
+    """Her TCP bağlantısı için YENİ challenge. Tek kullanımlık."""
+    return secrets.token_bytes(CHALLENGE_LEN)
+
+
+def compute_auth(token: bytes, challenge: bytes, nonce: bytes) -> bytes:
+    """HMAC-SHA256(token, LABEL ‖ challenge ‖ nonce) → 32 bayt.
+
+    Kotlin karşılığı: PairingCrypto.computeAuth
+    """
+    if len(token) != TOKEN_LEN:
+        raise PairingError(f"token {TOKEN_LEN} bayt olmalı")
+    if len(challenge) != CHALLENGE_LEN:
+        raise PairingError(f"challenge {CHALLENGE_LEN} bayt olmalı")
+    if len(nonce) != NONCE_LEN:
+        raise PairingError(f"nonce {NONCE_LEN} bayt olmalı")
+    return hmac.new(token, AUTH_LABEL + challenge + nonce, sha256).digest()
+
+
+def build_auth_body(token: bytes, challenge: bytes,
+                    nonce: bytes | None = None) -> bytes:
+    """İstemcinin göndereceği AUTH gövdesi: nonce(16) ‖ mac(32)."""
+    if nonce is None:
+        nonce = secrets.token_bytes(NONCE_LEN)
+    return nonce + compute_auth(token, challenge, nonce)
+
+
+def verify_auth(token: bytes, challenge: bytes, body: bytes) -> bool:
+    """AUTH gövdesini doğrular. Sabit zamanlı; hiçbir durumda exception atmaz.
+
+    Uzunluk yanlışsa `compare_digest`'e hiç gitmeden False döner — bu bir
+    zamanlama sızıntısı değil, çünkü uzunluk zaten tel üzerinde açıkça
+    görünüyor.
+    """
+    if len(body) != AUTH_LEN:
+        return False
+    nonce, mac = body[:NONCE_LEN], body[NONCE_LEN:]
+    try:
+        expected = compute_auth(token, challenge, nonce)
+    except PairingError:
+        return False
+    return hmac.compare_digest(mac, expected)
+
+
+# ── Çerçeve yardımcıları ─────────────────────────────────────────────
+#
+# vpad_daemon.encode_frame ile aynı biçim. Burada tekrarlanıyor ki bu modül
+# ve testleri daemon'ı (ve onun zeroconf bağımlılığını) içe aktarmak zorunda
+# kalmasın.
+
+def encode_frame(msg_type: int, payload: bytes = b"") -> bytes:
+    total = 3 + len(payload)
+    if total > MAX_FRAME:
+        raise PairingError(f"çerçeve çok büyük: {total} > {MAX_FRAME}")
+    return struct.pack("<HB", total, msg_type) + payload
+
+
+def encode_challenge(challenge: bytes) -> bytes:
+    if len(challenge) != CHALLENGE_LEN:
+        raise PairingError(f"challenge {CHALLENGE_LEN} bayt olmalı")
+    return encode_frame(T_CHALLENGE, challenge)
+
+
+def encode_auth(token: bytes, challenge: bytes,
+                nonce: bytes | None = None) -> bytes:
+    return encode_frame(T_AUTH, build_auth_body(token, challenge, nonce))
+
+
+def encode_reject(reason: int, message: str = "") -> bytes:
+    """vpad_daemon.encode_reject ile aynı biçim."""
+    return encode_frame(T_REJECT, bytes([reason]) + message.encode("utf-8"))
+
+
+# ── Sunucu tarafı eşleşme kapısı ─────────────────────────────────────
+
+class PairingGate:
+    """Sunucu tarafı el sıkışma durumu. **Hiç I/O yapmaz.**
+
+    Çerçeve üretir ve gelen çerçeveyi doğrular; soketi çağıran yönetir. Bu
+    ayrım bilinçli: kapı, gerçek bir soket olmadan test edilebiliyor ve
+    daemon'a bağlanması birkaç satır kalıyor (bkz. DAEMON_PATCH.md).
+
+    Kullanım:
+
+        gate = PairingGate(token)              # token None → eşleşme kapalı
+        opening = gate.opening_frame()
+        if opening:
+            sock.sendall(opening)              # CHALLENGE
+            mtype, payload = next(reader)
+            ok, reject = gate.accept(mtype, payload)
+            if not ok:
+                sock.sendall(reject)
+                return
+        # buradan sonrası mevcut akış: HELLO bekle
+    """
+
+    __slots__ = ("_token", "_challenge", "_settled")
+
+    def __init__(self, token: bytes | None):
+        if token is not None and len(token) != TOKEN_LEN:
+            raise PairingError(f"token {TOKEN_LEN} bayt olmalı")
+        self._token = token
+        self._challenge: bytes | None = None
+        self._settled = False
+
+    @property
+    def enabled(self) -> bool:
+        return self._token is not None
+
+    @property
+    def challenge(self) -> bytes | None:
+        """Bu bağlantı için üretilmiş challenge (tanı/test amaçlı)."""
+        return self._challenge
+
+    def opening_frame(self) -> bytes | None:
+        """Bağlantı kabul edilir edilmez gönderilecek CHALLENGE çerçevesi.
+
+        Eşleşme kapalıysa None döner ve akış bugünkünün aynısı kalır —
+        mevcut iPhone istemcisi hiçbir şey fark etmez.
+        """
+        if not self.enabled:
+            return None
+        # Her bağlantıda YENİ challenge. Aynı kapı yeniden kullanılırsa
+        # (olmamalı) yine tazelenir.
+        self._challenge = make_challenge()
+        self._settled = False
+        return encode_challenge(self._challenge)
+
+    def accept(self, msg_type: int, payload: bytes) -> tuple[bool, bytes | None]:
+        """İstemcinin ilk çerçevesini değerlendirir.
+
+        Dönüş: `(kabul, reddedilirse gönderilecek REJECT çerçevesi)`.
+        """
+        if not self.enabled:
+            return True, None
+        if self._settled:
+            raise PairingError("kapı zaten karara bağlandı")
+        if self._challenge is None:
+            raise PairingError("opening_frame() çağrılmadan accept() çağrıldı")
+
+        self._settled = True
+
+        if msg_type != T_AUTH:
+            # Eşleşme açıkken doğrudan HELLO göndermek = token'sız istemci
+            # (eski sürüm uygulama veya elle bağlanmaya çalışan biri).
+            return False, encode_reject(
+                R_AUTH_REQUIRED,
+                "bu host QR ile eşleşme istiyor; uygulamada QR'ı tarayın",
+            )
+
+        if not verify_auth(self._token, self._challenge, payload):
+            return False, encode_reject(R_AUTH_FAILED, "eşleşme doğrulaması başarısız")
+
+        return True, None
+
+
+# ── QR gösterimi ─────────────────────────────────────────────────────
+
+def render_qr_terminal(payload: str, big: bool = False) -> str:
+    """QR'ı terminale basılabilir metne çevirir.
+
+    `qrcode` paketi yoksa ImportError YAYMAZ — bunun yerine adresi metin
+    olarak veren bir geri düşüş döner. Sebep: QR bir kolaylık; onun eksikliği
+    daemon'ın açılmasını engellememeli. Kullanıcı hâlâ elle girebilir.
+    """
+    try:
+        import qrcode  # noqa: PLC0415 — opsiyonel, tembel içe aktarma
+    except ImportError:
+        return (
+            "  [!] `qrcode` paketi kurulu değil, QR basılamıyor.\n"
+            "      Kurmak için: pip install qrcode\n"
+            f"      Elle giriş  : {payload}\n"
+        )
+
+    code = qrcode.QRCode(
+        # ERROR_CORRECT_M: %15 hata toleransı. Ekran QR'ı için L yeterli
+        # olurdu, ama M kamera açısı/parlama toleransını gözle görülür
+        # artırıyor ve payload kısa olduğu için matris büyümüyor.
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        border=4,  # spec 4 modül sessiz bölge ister; taranabilirlik buna bağlı
+    )
+    code.add_data(payload)
+    code.make(fit=True)
+
+    matrix = code.get_matrix()
+    return _matrix_to_text(matrix, big)
+
+
+def _matrix_to_text(matrix: list[list[bool]], big: bool) -> str:
+    """Modül matrisini ANSI renkli metne çevirir.
+
+    Renkler AÇIKÇA veriliyor: tarayıcılar AÇIK zemin üzerine KOYU modül
+    bekler. Terminal teması koyuysa varsayılan renklerle QR ters çıkar ve
+    çoğu telefon kamerası onu okumaz.
+    """
+    reset = "\x1b[0m"
+    out: list[str] = []
+
+    if big:
+        # Modül başına iki boşluk — uzaktan/düşük ışıkta taramak için.
+        for row in matrix:
+            line = "".join("\x1b[40m  " if cell else "\x1b[107m  " for cell in row)
+            out.append(line + reset)
+        return "\n".join(out) + "\n"
+
+    # Yarım blok '▀': bir karakter hücresi iki dikey modül taşır, en-boy
+    # oranı doğru çıkar ve QR yarı yüksekliğe sığar.
+    height = len(matrix)
+    for y in range(0, height, 2):
+        upper_row = matrix[y]
+        lower_row = matrix[y + 1] if y + 1 < height else [False] * len(upper_row)
+        line = []
+        for x in range(len(upper_row)):
+            fg = "30" if upper_row[x] else "97"
+            bg = "40" if lower_row[x] else "107"
+            line.append(f"\x1b[{fg};{bg}m▀")
+        out.append("".join(line) + reset)
+    return "\n".join(out) + "\n"

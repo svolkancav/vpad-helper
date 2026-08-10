@@ -1,0 +1,8 @@
+# Gradle çıktıları — jvm-verify yalnızca doğrulama projesi, çıktısı teslimat değil
+jvm-verify/build/
+jvm-verify/.gradle/
+jvm-verify/gradle.properties
+
+# Python
+__pycache__/
+*.pyc
