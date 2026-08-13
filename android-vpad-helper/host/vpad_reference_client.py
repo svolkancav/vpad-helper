@@ -26,6 +26,7 @@ Kullanım:
 from __future__ import annotations
 
 import argparse
+import select
 import socket
 import sys
 import time
@@ -158,6 +159,8 @@ class VPadClient:
         self._sock: socket.socket | None = None
         self._reader: FrameReader | None = None
         self.paired = False
+        # Host'un atadığı oyuncu indeksi (0..3); None = tek oyunculu host.
+        self.slot: int | None = None
 
     def connect(self, timeout: float = 10.0, pair_wait: float = 2.0) -> None:
         """Bağlan, gerekiyorsa eşleş, HELLO_ACK'e kadar git.
@@ -202,6 +205,15 @@ class VPadClient:
                         f"{len(payload)} geldi")
                 sock.sendall(pairing.encode_auth(self.info.token, payload))
                 self.paired = True
+                # Token yanlışsa host REJECT gönderip soketi KAPATIR. Bu
+                # noktada HELLO göndermek, kapanmakta olan sokete yazmak
+                # demektir: karşı taraf RST ile cevap verir ve RST, bizim
+                # tamponumuzda bekleyen REJECT'i de SİLER. Sonuç, kullanıcının
+                # "yanlış QR" yerine ham "bağlantı sıfırlandı" görmesi.
+                # Bu yüzden HELLO'dan ÖNCE, bloklamadan bakıyoruz.
+                early = self._poll_frame()
+                if early is not None and early[0] == pairing.T_REJECT:
+                    self._raise_reject(early[1])
             elif msg_type == pairing.T_REJECT:
                 self._raise_reject(payload)
             else:
@@ -209,13 +221,56 @@ class VPadClient:
                     f"ilk çerçeve CHALLENGE olmalıydı, 0x{msg_type:02x} geldi")
 
         # --- 2) HELLO / HELLO_ACK ---
-        sock.sendall(encode_hello(self.name))
-        msg_type, payload = self._reader.next_frame()
+        try:
+            sock.sendall(encode_hello(self.name))
+            msg_type, payload = self._read_until(pairing.T_HELLO_ACK)
+        except (ConnectionResetError, ConnectionAbortedError,
+                BrokenPipeError) as exc:
+            # Yukarıdaki yarışın kalan payı: REJECT henüz gelmemişken HELLO
+            # yazdıysak RST'yi burada yeriz ve REJECT kaybolur. AUTH
+            # gönderdikten sonra host'un bağlantıyı kapatmasının pratikteki
+            # tek sebebi eşleşmenin reddedilmesidir; kullanıcıya ham soket
+            # hatası yerine bunu söylemek hem daha doğru hem eyleme
+            # dönüştürülebilir.
+            if self.paired:
+                raise Rejected(
+                    pairing.R_AUTH_FAILED,
+                    "host AUTH sonrasi baglantiyi kapatti") from exc
+            raise
         if msg_type == pairing.T_REJECT:
             self._raise_reject(payload)
-        if msg_type != pairing.T_HELLO_ACK:
-            raise ProtocolError(
-                f"HELLO_ACK bekleniyordu, 0x{msg_type:02x} geldi")
+
+    def _poll_frame(self) -> tuple[int, bytes] | None:
+        """**Bloklamadan**: hâlihazırda gelmiş bir çerçeve varsa döner.
+
+        `select` sıfır zaman aşımıyla yalnızca "okunacak bir şey var mı" diye
+        bakar; yoksa anında None. Kotlin karşılığı:
+        `WifiGamepadClient.drainBuffered`.
+        """
+        sock = self._require_socket()
+        if not select.select([sock], [], [], 0)[0]:
+            return None
+        try:
+            return self._reader.next_frame()  # type: ignore[union-attr]
+        except (OSError, ProtocolError):
+            return None
+
+    def _read_until(self, wanted: int) -> tuple[int, bytes]:
+        """`wanted` (ya da REJECT) gelene kadar okur.
+
+        Aradaki çerçeveler **yan kanal**: `T_SLOT` yakalanır, tanınmayan her
+        tip sessizce atılır. Spec §9 istemcilerden tam olarak bunu istiyor —
+        aksi hâlde host bir gün SLOT ya da RUMBLE gönderdiğinde bağlantı
+        kırılırdı.
+
+        Kotlin karşılığı: `WifiGamepadClient.readUntil`.
+        """
+        while True:
+            msg_type, payload = self._reader.next_frame()  # type: ignore[union-attr]
+            if msg_type in (wanted, pairing.T_REJECT):
+                return msg_type, payload
+            if msg_type == pairing.T_SLOT and payload:
+                self.slot = payload[0]
 
     def _raise_reject(self, payload: bytes) -> None:
         reason = payload[0] if payload else 0xFF
@@ -233,9 +288,9 @@ class VPadClient:
     def ping(self) -> None:
         sock = self._require_socket()
         sock.sendall(pairing.encode_frame(T_PING))
-        msg_type, _ = self._reader.next_frame()  # type: ignore[union-attr]
-        if msg_type != T_PONG:
-            raise ProtocolError(f"PONG bekleniyordu, 0x{msg_type:02x} geldi")
+        msg_type, payload = self._read_until(T_PONG)
+        if msg_type == pairing.T_REJECT:
+            self._raise_reject(payload)
 
     def close(self) -> None:
         if self._sock is None:
@@ -310,7 +365,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"HATA: baglanilamadi - {exc}", file=sys.stderr)
         return 4
 
-    print(f"[ok] eslesti ({'QR token' if client.paired else 'eslesmesiz mod'})")
+    slot_note = "" if client.slot is None else f", oyuncu {client.slot + 1}"
+    print(f"[ok] eslesti "
+          f"({'QR token' if client.paired else 'eslesmesiz mod'}{slot_note})")
 
     period = 1.0 / max(1.0, args.rate)
     deadline = time.monotonic() + args.hold

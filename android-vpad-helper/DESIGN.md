@@ -167,6 +167,7 @@ Eklenen tipler ve sebep kodları:
 |---|---|---|---|
 | `T_CHALLENGE` | `0x13` | host → istemci | 16 bayt challenge |
 | `T_AUTH` | `0x06` | istemci → host | 16 bayt nonce + 32 bayt mac |
+| `T_SLOT` | `0x14` | host → istemci | 1 bayt oyuncu indeksi (0..3), çoklu oyuncu |
 | `R_AUTH_REQUIRED` | `0x04` | REJECT sebebi | eşleşme açık ama AUTH gelmedi |
 | `R_AUTH_FAILED` | `0x05` | REJECT sebebi | MAC uyuşmadı |
 
@@ -276,7 +277,10 @@ testine sabit olarak gömülür, Kotlin aynı girdiden aynı MAC'i üretmek zoru
 
 - **Şifreli girdi kanalı.** Bkz. §4 "Kalan risk".
 - **Rumble.** Protokolde output yolu yok; BT tarafında da yok (`HidDescriptor` KDoc).
-- **Çoklu telefon.** Daemon tasarım gereği tek istemci; bu değişmiyor.
+- ~~**Çoklu telefon.**~~ **Artık kapsamda** (2026-08-13): `T_SLOT` (0x14) ile
+  host slot atıyor, `host/vpad_slots.py` havuzu dağıtıyor, `--players` ile
+  açılıyor. Varsayılan hâlâ 1 — verilmezse daemon tek istemci. Tasarım:
+  `docs/wifi-transport-architecture.md` §10, yama: `DAEMON_PATCH.md` §7.
 - **Linux host.** `vpad_daemon.py` Linux'ta `--inject log` ile çalışır, gerçek
   enjeksiyon yolu yok. Eşleşme katmanı platformdan bağımsız olduğu için Linux
   enjeksiyonu eklendiğinde bu tasarım aynen geçerli.

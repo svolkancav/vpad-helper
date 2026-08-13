@@ -148,6 +148,105 @@ sunucu tarafında zorunlu.
 
 ---
 
+## 7. (Opsiyonel) Çoklu oyuncu — 4 telefon
+
+Tasarım ve gerekçeler: `docs/wifi-transport-architecture.md` §10. Bu bölüm
+**bağımsızdır**: eşleşme yaması olmadan da uygulanabilir, uygulanmazsa daemon
+tek oyunculu kalır.
+
+**Varsayılan 1.** `--players` verilmezse davranış bugünküyle birebir aynıdır —
+`--pair` ile aynı disiplin.
+
+### 7.1 İçe aktarma ve bayrak
+
+```python
+import vpad_slots as slots
+```
+
+```python
+    parser.add_argument("--players", type=int, default=1,
+                        choices=range(1, slots.MAX_SLOTS + 1),
+                        help="aynı anda kaç telefon bağlanabilir "
+                             "(XInput tavanı 4; varsayılan 1)")
+```
+
+### 7.2 Modül düzeyindeki kilit yerine havuz
+
+`_active_lock` / `_active_peer` ikilisi kalkar:
+
+```python
+_slots = slots.SlotPool(1)   # main() içinde args.players ile yeniden kurulur
+```
+
+`main()` içinde, injector seçildikten sonra:
+
+```python
+    _slots = slots.SlotPool(args.players)
+    injectors = [make_injector(args.inject) for _ in range(args.players)]
+```
+
+> **macOS istisnası.** `MacKbmInjector` klavye/fare öykünmesi yapıyor; dört
+> oyuncunun tek klavyeye basması anlamsız. `sys.platform == "darwin"` ise
+> `args.players` 1'e sabitlenmeli ve sebebi ekrana yazılmalı.
+
+### 7.3 `handle_client` — kilit yerine slot
+
+`_active_lock.acquire(...)` bloğunun yerine:
+
+```python
+        lease = _slots.acquire(f"{pad_name} @ {addr[0]}")
+        if lease is None:
+            client.sendall(encode_reject(
+                R_IN_USE,
+                f"all {_slots.size} player slots are in use"))
+            print(f"[{ts()}] ✗ refused — {_slots.size} slot dolu (in_use)")
+            return
+        injector = injectors[lease.index]
+```
+
+`HELLO_ACK`'ten **hemen sonra**, tek yazımda:
+
+```python
+        client.sendall(encode_hello_ack(PROTO_VER, accept=True)
+                       + pairing.encode_slot(lease.index))
+        print(f"[{ts()}] ◂ HELLO_ACK + SLOT={lease.index}")
+```
+
+Tek yazım bilinçli: iki çağrı da doğru çalışır ama aynı segmentte gitmek
+istemcinin **bloklamayan** slot tahliyesine denk düşer, yani "Oyuncu 2" rozeti
+ilk karede görünür. Gecikirse de kayıp değil — istemci onu sonraki okumada
+yakalar.
+
+`finally` bloğunda, `injector.reset()`'ten **sonra**:
+
+```python
+        if lease is not None:
+            _slots.release(lease)
+```
+
+Sıra kritik: önce nötr, sonra slot serbest. Tersi, sonraki oyuncunun basılı
+bir tuşla başlaması demek.
+
+### 7.4 Neden slot'u host atıyor
+
+`Technosaurus8/Magic-Gamepad-Windows` slot'u mesajın içine koyuyor (`p1`…`p4`
+öneki) ve host o indeksi kullanıyor. İki telefon da `p1` derse birbirinin
+girdisini sessizce ezer. Burada istemci kendi numarasını beyan edemez;
+yalnızca `T_SLOT` ile öğrenir.
+
+ViGEm tarafının nasıl yazılacağını aynı depo çalışan kodla gösteriyor: dört
+pad önden yaratılıyor, `AutoSubmitReport = false`, `Connect()` talep üzerine,
+Win32 hatasında pad yeniden yaratılıyor. `vgamepad` aynı API'nin Python
+sarmalı.
+
+### 7.5 Doğrulama
+
+`SlotPool` **hiç I/O yapmaz**, dolayısıyla dört telefon olmadan sınanır:
+`python -m unittest test_vpad_slots -v` (15 test — dağıtım, yapışkanlık,
+çift bırakma, 5. istemcinin reddi).
+
+---
+
 ## Doğrulama
 
 Yama uygulandıktan sonra, telefon olmadan:

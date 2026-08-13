@@ -65,6 +65,17 @@ class WifiGamepadClient(
     var paired: Boolean = false
         private set
 
+    /**
+     * Host'un atadığı oyuncu indeksi (0..3), yoksa `null`.
+     *
+     * `null` **tek oyunculu host** demektir — hata değil. Slot'u host atar;
+     * istemci kendi numarasını beyan edemez (aksi hâlde iki telefon aynı
+     * slotu sahiplenip birbirinin girdisini ezerdi).
+     */
+    @Volatile
+    var playerSlot: Int? = null
+        private set
+
     @Volatile
     var state: WifiConnectionState = WifiConnectionState.Idle
         private set
@@ -110,6 +121,7 @@ class WifiGamepadClient(
         // yeni akışa sızmamalı.
         decoder = WifiFrameCodec.Decoder()
         paired = false
+        playerSlot = null
         lastReportFrame = null
 
         emit(WifiConnectionState.Connecting(info.host, info.port))
@@ -127,7 +139,7 @@ class WifiGamepadClient(
             // ── 1) Eşleşme kapısı ──
             sock.soTimeout = pairWaitMs
             val first: WifiFrameCodec.Frame? = try {
-                readFrame()
+                readUntil(WifiFrameCodec.T_CHALLENGE)
             } catch (_: SocketTimeoutException) {
                 null // host sessiz → eşleşme kapalı
             }
@@ -146,6 +158,13 @@ class WifiGamepadClient(
                         val body = PairingCrypto.buildAuthBody(info.token, first.payload)
                         write(WifiFrameCodec.encodeFrame(WifiFrameCodec.T_AUTH, body))
                         paired = true
+                        // Token yanlışsa host REJECT gönderip soketi KAPATIR.
+                        // Bu noktada HELLO yazmak, kapanmakta olan sokete
+                        // yazmaktır: karşı taraf RST ile cevap verir ve RST
+                        // tamponumuzdaki REJECT'i de SİLER — kullanıcı
+                        // "yanlış QR" yerine ham bir ağ hatası görür.
+                        // O yüzden HELLO'dan ÖNCE bloklamadan bakıyoruz.
+                        drainBuffered()?.let { throwRejected(it.payload) }
                     }
                     WifiFrameCodec.T_REJECT -> throwRejected(first.payload)
                     else -> throw WifiProtocolException(
@@ -156,14 +175,36 @@ class WifiGamepadClient(
             }
 
             // ── 2) HELLO / HELLO_ACK ──
-            write(WifiFrameCodec.encodeHello(deviceName))
-            val ack = readFrame()
-            if (ack.type == WifiFrameCodec.T_REJECT) throwRejected(ack.payload)
-            if (ack.type != WifiFrameCodec.T_HELLO_ACK) {
-                throw WifiProtocolException(
-                    "HELLO_ACK bekleniyordu, 0x${ack.type.toString(16)} geldi",
-                )
+            val ack = try {
+                write(WifiFrameCodec.encodeHello(deviceName))
+                readUntil(WifiFrameCodec.T_HELLO_ACK)
+            } catch (e: IOException) {
+                // Yukarıdaki yarışın kalan payı: REJECT henüz gelmemişken
+                // HELLO yazdıysak RST'yi burada yeriz ve REJECT kaybolur.
+                // AUTH gönderdikten sonra host'un bağlantıyı kapatmasının
+                // pratikteki tek sebebi eşleşmenin reddedilmesidir; ham soket
+                // hatası yerine bunu söylemek hem daha doğru hem kullanıcının
+                // yapabileceği bir şeye işaret ediyor ("QR'ı yeniden tara").
+                if (paired && e !is SocketTimeoutException) {
+                    throw WifiRejectedException(
+                        WifiFrameCodec.R_AUTH_FAILED,
+                        "host AUTH sonrası bağlantıyı kapattı",
+                    )
+                }
+                throw e
             }
+            if (ack.type == WifiFrameCodec.T_REJECT) throwRejected(ack.payload)
+
+            // ── 3) Slot (çoklu oyuncu) ──
+            // Çoklu oyuncu modundaki host, HELLO_ACK'in hemen ardından
+            // T_SLOT yolluyor — pratikte aynı TCP segmentinde gelir ve
+            // tamponda hazır bekler. Bu yüzden BLOKLAMADAN alıyoruz: tek
+            // oyunculu host hiç göndermediği için beklemek, bağlanan
+            // herkese bedava gecikme yazdırırdı.
+            //
+            // Geç gelirse kayıp değil: bir sonraki okumada [readUntil]
+            // onu yan kanal olarak yakalar.
+            drainBuffered()
 
             // Bağlantı kurulur kurulmaz nötr durumdayız. Kalp atışının
             // tekrarlayacak bir şeyi olsun diye başlangıç değeri budur —
@@ -171,7 +212,11 @@ class WifiGamepadClient(
             // bağlantısı yine 10 saniyede düşerdi.
             lastReportFrame = WifiFrameCodec.encodeReport()
             if (heartbeatMs > 0) startHeartbeat(heartbeatMs)
-            emit(WifiConnectionState.Connected(info.host, info.port, paired))
+            emit(
+                WifiConnectionState.Connected(
+                    info.host, info.port, paired, playerSlot,
+                ),
+            )
         } catch (e: WifiRejectedException) {
             closeQuietly()
             emit(WifiConnectionState.Rejected(e.reason, e.detail))
@@ -225,12 +270,10 @@ class WifiGamepadClient(
     @Throws(IOException::class)
     fun ping() {
         write(WifiFrameCodec.encodeFrame(WifiFrameCodec.T_PING))
-        val frame = readFrame()
-        if (frame.type != WifiFrameCodec.T_PONG) {
-            throw WifiProtocolException(
-                "PONG bekleniyordu, 0x${frame.type.toString(16)} geldi",
-            )
-        }
+        // readUntil: araya giren SLOT ya da tanımadığımız bir tip PONG'u
+        // kaçırtmaz.
+        val frame = readUntil(WifiFrameCodec.T_PONG)
+        if (frame.type == WifiFrameCodec.T_REJECT) throwRejected(frame.payload)
     }
 
     /**
@@ -384,6 +427,59 @@ class WifiGamepadClient(
             out.flush()
             lastWriteAtMs = System.currentTimeMillis()
             return true
+        }
+    }
+
+    /**
+     * [wanted] tipi (ya da REJECT) gelene kadar okur.
+     *
+     * Aradaki çerçeveler **yan kanal** sayılır: [WifiFrameCodec.T_SLOT]
+     * yakalanır, tanınmayan her tip sessizce atılır. Spec §9 istemcilerden
+     * tam olarak bunu istiyor ("old clients just ignore the unknown type")
+     * ve bunu yapmamak, host bir gün SLOT veya RUMBLE gönderdiğinde
+     * bağlantıyı kırardı — `ping()` "PONG bekleniyordu, 0x14 geldi" diye
+     * patlardı.
+     */
+    @Throws(IOException::class)
+    private fun readUntil(wanted: Int): WifiFrameCodec.Frame {
+        while (true) {
+            val frame = readFrame()
+            if (frame.type == wanted || frame.type == WifiFrameCodec.T_REJECT) {
+                return frame
+            }
+            consumeSideChannel(frame)
+        }
+    }
+
+    /** Yan kanal çerçevesi: tanıyorsak işleriz, tanımıyorsak atarız. */
+    private fun consumeSideChannel(frame: WifiFrameCodec.Frame) {
+        if (frame.type == WifiFrameCodec.T_SLOT && frame.payload.isNotEmpty()) {
+            playerSlot = frame.payload[0].toInt() and 0xFF
+        }
+    }
+
+    /**
+     * **Bloklamadan** hâlihazırda gelmiş çerçeveleri tüketir; ilk REJECT'i
+     * döndürür (yoksa `null`).
+     *
+     * Tamponda bekleyeni ve soket üzerinde okumaya hazır olanı alır; hiçbir
+     * şey yoksa anında döner. Henüz gelmemiş bir çerçeve için **beklemez** —
+     * beklemek, tek oyunculu host'a bağlanan herkese bedava gecikme
+     * yazdırırdı (bkz. [connect] §3).
+     */
+    private fun drainBuffered(): WifiFrameCodec.Frame? {
+        val stream = input ?: return null
+        while (true) {
+            val buffered = decoder.poll()
+            if (buffered != null) {
+                if (buffered.type == WifiFrameCodec.T_REJECT) return buffered
+                consumeSideChannel(buffered)
+                continue
+            }
+            if (stream.available() <= 0) return null
+            val read = stream.read(readBuffer)
+            if (read <= 0) return null
+            decoder.push(readBuffer, read)
         }
     }
 

@@ -3,7 +3,7 @@
 Bu paket **hiçbir mevcut dosyaya dokunmaz.** Aşağıdakiler, WiFi + QR
 eşleşmesini uygulamaya eklemek için yapılacakların tam listesidir.
 
-Ön koşul: `core/` altındaki dört dosya **JVM'de derlenmiş ve 52 testle
+Ön koşul: `core/` altındaki dört dosya **JVM'de derlenmiş ve 56 testle
 doğrulanmış** durumda (`jvm-verify/`). `ui/` altındakiler Android'e özgü
 olduğu için ancak uygulama içinde derlenir.
 
@@ -314,7 +314,7 @@ Bu sırayla ilerleyin; her adım bir öncekini varsayar:
    --press A --hold 2` — host'ta A tuşuna basılı raporlar görünmeli. Bu
    adım host tarafının doğru olduğunu kanıtlar.
 
-3. **Kotlin çekirdeğini sına.** `jvm-verify/` içinde `gradle test` — 52 test
+3. **Kotlin çekirdeğini sına.** `jvm-verify/` içinde `gradle test` — 56 test
    geçmeli. Bu adım Kotlin tarafının Python ile aynı teli konuştuğunu
    kanıtlar (altın vektör testi).
 

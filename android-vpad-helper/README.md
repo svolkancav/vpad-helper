@@ -40,7 +40,8 @@ Tasarımın tamamı, gerekçeleri ve tehdit modeli: **[DESIGN.md](DESIGN.md)**
 | Rapor uyumu | 8 baytlık REPORT, `HidReportSender`'ın ürettiğiyle **birebir** |
 | Geriye uyum | `--pair` verilmezse daemon bugünkü davranışını korur |
 | Boşta kalma | 2 sn'de bir kalp atışı — host'un 10 sn'lik zaman aşımına karşı |
-| Test | **31 Python + 9 uçtan uca + 52 Kotlin = 92**, hepsi geçiyor |
+| Çoklu oyuncu | host slot atar (`T_SLOT` 0x14), 4'e kadar — XInput tavanı |
+| Test | **46 Python + 9 uçtan uca + 56 Kotlin = 111**, hepsi geçiyor |
 
 Kritik ayrıntı: `vpad_daemon.py`'nin 8 baytlık REPORT gövdesi zaten
 `HidReportSender.kt`'nin Bluetooth'a yazdığı 8 baytın aynısıydı — buton
@@ -57,8 +58,10 @@ android-vpad-helper/
 ├── DESIGN.md                  tasarım, protokol, tehdit modeli
 ├── host/                      ── Python tarafı (çalışır ve test edilir)
 │   ├── vpad_pairing.py        token · payload · QR · HMAC · LAN kuralı
+│   ├── vpad_slots.py          çoklu oyuncu slot havuzu (I/O yapmaz)
 │   ├── vpad_reference_client.py  çalışan istemci + yürütülebilir şartname
 │   ├── test_vpad_pairing.py   31 birim testi
+│   ├── test_vpad_slots.py     15 birim testi
 │   ├── test_e2e_pairing.py    9 uçtan uca test (gerçek soket)
 │   └── DAEMON_PATCH.md        vpad_daemon.py'ye uygulanacak değişiklikler
 ├── android/
@@ -86,14 +89,14 @@ teslim edilen dosyalarla test edilen dosyalar aynı, sürüklenme imkânsız.
 
 ```bash
 cd host
-python -m unittest discover -s . -v      # 30 + 9 test
+python -m unittest discover -s . -v      # 46 + 9 test
 ```
 
 ### Kotlin çekirdek testleri
 
 ```bash
 cd jvm-verify
-gradle test                               # 49 test
+gradle test                               # 56 test
 ```
 
 Gradle 8.5+ yeterli; wrapper bilinçli olarak eklenmedi (ikili dosya taşımamak
@@ -130,7 +133,7 @@ dene → ancak sonra rapor hunisini bağla.
 |---|---|
 | Host eşleşme mantığı | ✅ 31 birim testi |
 | Host uçtan uca (gerçek soket) | ✅ 9 test |
-| Kotlin çekirdek | ✅ 52 test, gerçek soket dahil |
+| Kotlin çekirdek | ✅ 56 test, gerçek soket dahil |
 | Python ↔ Kotlin protokol sözleşmesi | ✅ altın vektör (aynı HMAC baytları) |
 | Android tarafı (`ui/`) | ✅ **derlendi** — AGP 8.13.2, SDK 36, minSdk 31 |
 | Gerçek telefon → gerçek host | ❌ **denenmedi** — fiziksel cihaz gerekir |

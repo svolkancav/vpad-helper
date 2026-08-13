@@ -35,6 +35,28 @@ object WifiFrameCodec {
     const val T_CHALLENGE = 0x13
     const val T_AUTH = 0x06
 
+    /**
+     * Host → istemci, 1 bayt: oyuncu indeksi (0..3). Çoklu oyuncu modunda
+     * `HELLO_ACK`'ten hemen sonra gelir; tek oyunculu host hiç göndermez.
+     *
+     * **Neden `HELLO_ACK` genişletilmedi:** o çerçevenin gövdesi spec'te 2 bayt
+     * olarak sabit ve iOS istemcisi uzunluğu doğruluyor — bir bayt eklemek
+     * sahadaki iPhone'ları kırardı. Yeni tip eklemek ise spec §9'a göre kırıcı
+     * değildir: tanımayan istemci atar.
+     */
+    const val T_SLOT = 0x14
+
+    /**
+     * Spec'in **ayırdığı ama henüz uygulanmayan** tip: host → istemci
+     * titreşim, 2 bayt, v3'e ertelenmiş (`companion-daemon.md` §4.7).
+     *
+     * Burada tanımlı olması bilinçli. Bu kod bir kez "boş" sanılıp CHALLENGE'a
+     * verilmişti; çalışan daemon'ın tablosunda görünmediği için boş duruyordu.
+     * Sabiti burada tutmak, kodun sahipli olduğunu koda yazar. Gelirse
+     * [WifiGamepadClient] tarafından yan kanal olarak atılır.
+     */
+    const val T_RUMBLE = 0x20
+
     // ── REJECT sebep kodları ──
     const val R_VERSION_MISMATCH = 0x01
     const val R_IN_USE = 0x02

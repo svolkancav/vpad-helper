@@ -32,14 +32,20 @@ class WifiFrameCodecTest {
         assertEquals(0x12, WifiFrameCodec.T_PONG)
         assertEquals(0x13, WifiFrameCodec.T_CHALLENGE)
         assertEquals(0x06, WifiFrameCodec.T_AUTH)
+        assertEquals(0x14, WifiFrameCodec.T_SLOT)
+        assertEquals(0x20, WifiFrameCodec.T_RUMBLE)
 
-        // Spec'in sahiplendiği kodlar — eşleşme katmanı bunlara giremez.
+        // Spec'in sahiplendiği kodlar — bizim eklediklerimiz bunlara giremez.
         val reserved = mapOf(
             0x01 to "HELLO", 0x02 to "REPORT", 0x03 to "PING", 0x04 to "BYE",
             0x05 to "MOUSE", 0x10 to "HELLO_ACK", 0x11 to "REJECT",
             0x12 to "PONG", 0x20 to "RUMBLE (v3, companion-daemon.md §4)",
         )
-        for (code in listOf(WifiFrameCodec.T_CHALLENGE, WifiFrameCodec.T_AUTH)) {
+        for (code in listOf(
+            WifiFrameCodec.T_CHALLENGE,
+            WifiFrameCodec.T_AUTH,
+            WifiFrameCodec.T_SLOT,
+        )) {
             assertNull(
                 reserved[code],
                 "eşleşme tipi 0x${code.toString(16)} zaten " +

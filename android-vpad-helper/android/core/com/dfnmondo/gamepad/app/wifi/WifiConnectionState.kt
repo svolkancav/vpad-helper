@@ -33,6 +33,13 @@ sealed class WifiConnectionState {
         val port: Int,
         /** Eşleşme kapısından mı geçildi, yoksa eşleşmesiz mod mu. */
         val paired: Boolean,
+        /**
+         * Host'un atadığı oyuncu indeksi (0..3) — çoklu oyuncu modunda.
+         * `null` = tek oyunculu host; arayüz "Oyuncu N" rozetini
+         * göstermez. Varsayılanı `null`, böylece tek oyunculu çağıranlar
+         * bu alanı hiç bilmek zorunda değil.
+         */
+        val slot: Int? = null,
     ) : WifiConnectionState()
 
     /**

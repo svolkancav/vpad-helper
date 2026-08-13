@@ -43,6 +43,12 @@ from hashlib import sha256
 T_CHALLENGE = 0x13  # host → istemci: 16 bayt challenge
 T_AUTH = 0x06       # istemci → host: 16 bayt nonce + 32 bayt mac
 
+# Çoklu oyuncu: host → istemci, 1 bayt oyuncu indeksi (0..3).
+# HELLO_ACK'ten hemen sonra gönderilir; tek oyunculu host hiç göndermez.
+# HELLO_ACK'in gövdesi GENİŞLETİLEMEZDİ — spec'te 2 bayt sabit ve iOS
+# istemcisi uzunluğu doğruluyor. Yeni tip eklemek ise §9'a göre kırıcı değil.
+T_SLOT = 0x14
+
 # vpad_daemon.py'deki karşılıkları — bu modül daemon'ı içe aktarmadığı için
 # burada da tanımlı. Değerler DEĞİŞTİRİLEMEZ, iki dosya aynı teli konuşuyor.
 T_HELLO = 0x01
@@ -318,6 +324,13 @@ def encode_challenge(challenge: bytes) -> bytes:
 def encode_auth(token: bytes, challenge: bytes,
                 nonce: bytes | None = None) -> bytes:
     return encode_frame(T_AUTH, build_auth_body(token, challenge, nonce))
+
+
+def encode_slot(index: int) -> bytes:
+    """Oyuncu indeksi çerçevesi. Kotlin karşılığı: `WifiFrameCodec.T_SLOT`."""
+    if not 0 <= index <= 3:
+        raise PairingError(f"slot 0..3 olmalı, {index} geldi")
+    return encode_frame(T_SLOT, bytes([index]))
 
 
 def encode_reject(reason: int, message: str = "") -> bytes:

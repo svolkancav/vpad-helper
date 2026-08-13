@@ -37,8 +37,11 @@ class WifiGamepadClientTest {
         hosts.clear()
     }
 
-    private fun host(token: ByteArray?): TestHost =
-        TestHost(token).also { hosts.add(it) }
+    private fun host(
+        token: ByteArray?,
+        slot: Int? = null,
+        beforePong: ByteArray = ByteArray(0),
+    ): TestHost = TestHost(token, slot, beforePong).also { hosts.add(it) }
 
     // ── Mutlu yol ───────────────────────────────────────────────────
 
@@ -270,6 +273,85 @@ class WifiGamepadClientTest {
         }
     }
 
+    // ── Çoklu oyuncu ────────────────────────────────────────────────
+
+    @Test
+    fun `coklu oyuncu host u slot atar ve istemci ogrenir`() {
+        val token = PairingCrypto.randomToken()
+        val h = host(token, slot = 2)
+        val client = WifiGamepadClient("Ucuncu Oyuncu")
+
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+        try {
+            assertEquals(2, client.playerSlot, "slot alınamadı")
+            val state = client.state
+            assertTrue(state is WifiConnectionState.Connected)
+            assertEquals(2, state.slot, "durum nesnesi slotu taşımıyor")
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `tek oyunculu host ta slot null kalir`() {
+        // `null` hata değil: host çoklu oyuncu modunda değil demek.
+        val token = PairingCrypto.randomToken()
+        val h = host(token)
+        val client = WifiGamepadClient("Tek")
+
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+        try {
+            assertNull(client.playerSlot)
+            val state = client.state
+            assertTrue(state is WifiConnectionState.Connected)
+            assertNull(state.slot)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `gec gelen slot cercevesi PONG u kacirtmaz`() {
+        // GERİLEME: istemci beklediği tipten başkasını görünce istisna
+        // atıyordu — `ping()` "PONG bekleniyordu, 0x14 geldi" diye
+        // patlardı. Spec §9 bilinmeyen/yan kanal tipinin ATLANMASINI
+        // istiyor. Burada SLOT, PONG'dan hemen önce geliyor.
+        val token = PairingCrypto.randomToken()
+        val lateSlot = WifiFrameCodec.encodeFrame(
+            WifiFrameCodec.T_SLOT, byteArrayOf(3),
+        )
+        val h = host(token, beforePong = lateSlot)
+        val client = WifiGamepadClient("Gec Slot")
+
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+        try {
+            client.ping() // istisna atmamalı
+            assertEquals(3, client.playerSlot, "geç gelen slot yakalanmadı")
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `tanimayan tip baglantiyi kirmaz`() {
+        // İleriye dönük uyum: host bir gün RUMBLE (0x20) ya da hiç
+        // bilmediğimiz bir tip gönderirse bağlantı ayakta kalmalı.
+        val token = PairingCrypto.randomToken()
+        val noise = WifiFrameCodec.encodeFrame(0x77, byteArrayOf(9, 9, 9)) +
+            WifiFrameCodec.encodeFrame(WifiFrameCodec.T_RUMBLE, byteArrayOf(1, 2))
+        val h = host(token, beforePong = noise)
+        val client = WifiGamepadClient("Gurultu")
+
+        client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+        try {
+            client.ping()
+            client.sendReport(buttons = 0x0001)
+            assertTrue(h.awaitReports(1), "gürültüden sonra girdi akmadı")
+        } finally {
+            client.close()
+        }
+    }
+
     // ── Kapanışla yarış (GERİLEME TESTİ) ────────────────────────────
 
     @Test
@@ -424,7 +506,13 @@ class WifiGamepadClientTest {
 /**
  * Eşleşme kapılı minik host. `DAEMON_PATCH.md`'deki akışın aynısı.
  */
-private class TestHost(private val token: ByteArray?) {
+private class TestHost(
+    private val token: ByteArray?,
+    /** Çoklu oyuncu modu: HELLO_ACK ile birlikte gönderilecek slot. */
+    private val slot: Int? = null,
+    /** PONG'dan hemen önce teli akıtılacak ham baytlar (gürültü testi). */
+    private val beforePong: ByteArray = ByteArray(0),
+) {
 
     private val server = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
     private val running = AtomicBoolean(true)
@@ -506,14 +594,33 @@ private class TestHost(private val token: ByteArray?) {
                 }
                 val nameLen = hello.payload[1].toInt() and 0xFF
                 hellos.add(String(hello.payload, 2, nameLen, Charsets.UTF_8))
-                out.writeFrame(WifiFrameCodec.T_HELLO_ACK, byteArrayOf(1, 1))
+
+                // HELLO_ACK ve (varsa) SLOT **tek yazımda**: gerçek daemon da
+                // ardışık gönderir ve ikisi aynı TCP segmentinde birleşir.
+                // Testin deterministik olması buna bağlı — ayrı yazımlarda
+                // SLOT, istemcinin bloklamayan tahliyesinden sonra gelebilir.
+                val ack = WifiFrameCodec.encodeFrame(
+                    WifiFrameCodec.T_HELLO_ACK, byteArrayOf(1, 1),
+                )
+                val slotFrame = slot?.let {
+                    WifiFrameCodec.encodeFrame(
+                        WifiFrameCodec.T_SLOT, byteArrayOf(it.toByte()),
+                    )
+                } ?: ByteArray(0)
+                out.write(ack + slotFrame)
+                out.flush()
 
                 while (true) {
                     val frame = conn.readFrame()
                     when (frame.type) {
                         WifiFrameCodec.T_REPORT -> reports.add(frame.payload)
-                        WifiFrameCodec.T_PING ->
+                        WifiFrameCodec.T_PING -> {
+                            if (beforePong.isNotEmpty()) {
+                                out.write(beforePong)
+                                out.flush()
+                            }
                             out.writeFrame(WifiFrameCodec.T_PONG, ByteArray(0))
+                        }
                         WifiFrameCodec.T_BYE -> return
                     }
                 }
