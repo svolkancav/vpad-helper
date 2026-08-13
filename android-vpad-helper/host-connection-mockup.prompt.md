@@ -58,8 +58,8 @@ YAPI (yukarıdan aşağı):
    İkinci ışıklı ayraçtan sonra, üç satırlık numaralı liste.
    Numaralar rün rakamları gibi stilize, mavi parıltılı daire içinde.
    1 — "Telefonun ve bilgisayarın aynı ağda olduğundan emin ol"
-   2 — "Bilgisayarına Remote Gamepad kur ve başlat"
-       (altında oymalı taş plaka üzerinde: remotegamepad.com/pc)
+   2 — "Bilgisayarına Virtual Gamepad kur ve başlat"
+       (altında oymalı taş plaka üzerinde: <indirme-adresi>)
    3 — "Ekranda beliren mührü telefonunla tara"
 
 5. ANA BUTON
@@ -80,10 +80,17 @@ yüksek, ortam karanlık, dikkat parlayan öğelerde.
 
 ## Uygulamaya geçerken dikkat
 
-- **§4 adım 2'deki "Remote Gamepad" ve `remotegamepad.com/pc`
-  yer tutucudur** — o ad App Store'daki rakip bir ürüne ait
-  (`docs/ios_report.md` §4.1). Ekrana girmeden önce kendi companion
-  adımızla ve kendi adresimizle değiştirilmeli.
+- **§4 adım 2'deki ürün adı "Virtual Gamepad"** (düzeltildi 2026-08-13).
+  Brief'in ilk hâlinde "Remote Gamepad" ve `remotegamepad.com/pc` yazıyordu;
+  o ad App Store'daki rakip bir ürüne ait (`docs/ios_report.md` §4.1) ve
+  ekrana girmemeli.
+  - **`<indirme-adresi>` hâlâ boş.** Gerçek adres belirlenmeden nihai görsel
+    üretilmemeli — uydurma bir alan adı, sahibi olmadığımız bir siteye
+    yönlendiren bir ekran demek.
+  - Adlandırma tutarlılığı: companion deposunda program **"V-Pad Helper"**
+    adıyla yayınlanıyor ("V-Pad Helper — the free companion app…"). Ekranda
+    "Virtual Gamepad" yazarsa kullanıcı indirme sayfasında farklı bir ad
+    görür. İkisinden biri diğerine uydurulmalı.
 - Maket **USB** yolu gösteriyor; protokolde bugün USB taşıyıcı yok
   (Android'de BT-HID, iOS'ta ağ). Ekran tasarımı desteklenmeyen bir
   yol vaat etmemeli — ya USB kartı çıkarılmalı ya "yakında" durumu
