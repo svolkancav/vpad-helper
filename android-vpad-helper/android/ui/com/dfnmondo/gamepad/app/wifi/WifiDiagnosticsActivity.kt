@@ -16,7 +16,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -169,7 +168,13 @@ class WifiDiagnosticsActivity : ComponentActivity() {
                         try {
                             action(c)
                             log("$label gönderildi")
-                        } catch (e: IOException) {
+                        } catch (e: Exception) {
+                            // `IOException` DEĞİL: bağlantı bu arada
+                            // kapandıysa `sendReport` denetlenmeyen
+                            // `WifiProtocolException` atar ve buradan kaçan
+                            // her istisna `net` iş parçacığında uygulamayı
+                            // öldürür (KillApplicationHandler). Tanı ekranı
+                            // hatayı gösterir, çökmez.
                             log("gönderilemedi: ${e.message}")
                         }
                     }

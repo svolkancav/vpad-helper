@@ -25,8 +25,15 @@ object WifiFrameCodec {
     const val T_PONG = 0x12
 
     // ── Eşleşme katmanının eklediği tipler ──
-    const val T_CHALLENGE = 0x20
-    const val T_AUTH = 0x21
+    //
+    // Kodların kayıt defteri `docs/companion-daemon.md` §4'tür, çalışan
+    // daemon değil: daemon yalnızca uyguladığı tipleri tanımlar, spec
+    // ileride kullanılacakları da AYIRIR. İlk sürüm CHALLENGE'ı 0x20'ye
+    // koymuştu; orası RUMBLE'a ayrılmış (S→C, v3) ve iOS istemcisi de öyle
+    // biliyor. Yeni kodlar spec'in yön bloklarındaki ilk boş yerler:
+    // S→C 0x10/0x11/0x12 → 0x13,  C→S 0x01..0x05 → 0x06.
+    const val T_CHALLENGE = 0x13
+    const val T_AUTH = 0x06
 
     // ── REJECT sebep kodları ──
     const val R_VERSION_MISMATCH = 0x01

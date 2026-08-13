@@ -249,6 +249,35 @@ class ChallengeResponseTests(unittest.TestCase):
 
 class FrameTests(unittest.TestCase):
 
+    # Spec'in (docs/companion-daemon.md §4) sahiplendiği tip kodları.
+    # 0x20 UYGULANMAMIŞ ama AYRILMIŞ: RUMBLE, v3'e ertelenmiş.
+    SPEC_TYPES = {
+        0x01: "HELLO", 0x02: "REPORT", 0x03: "PING", 0x04: "BYE",
+        0x05: "MOUSE", 0x10: "HELLO_ACK", 0x11: "REJECT", 0x12: "PONG",
+        0x20: "RUMBLE (v3)",
+    }
+
+    def test_pairing_type_codes_pinned_and_free(self):
+        """GERİLEME: CHALLENGE bir ara 0x20'ye konmuştu — RUMBLE'ın yeri.
+
+        Diğer testlerin hepsi `p.T_CHALLENGE` gibi SEMBOLİK kullanıyor,
+        yani yanlış bir değer atansa hiçbiri kırılmaz. Kodlar burada telde
+        oldukları hâliyle çivileniyor; Kotlin karşılığı
+        `WifiFrameCodecTest.tip kodlari spec kayit defteriyle ayni`.
+        """
+        self.assertEqual(p.T_CHALLENGE, 0x13)
+        self.assertEqual(p.T_AUTH, 0x06)
+        for code in (p.T_CHALLENGE, p.T_AUTH):
+            self.assertNotIn(
+                code, self.SPEC_TYPES,
+                f"eşleşme tipi 0x{code:02x} spec'te "
+                f"{self.SPEC_TYPES.get(code)} için ayrılmış")
+        # REJECT sebepleri: spec 0x01/0x02/0x03/0xff kullanıyor.
+        self.assertEqual(p.R_AUTH_REQUIRED, 0x04)
+        self.assertEqual(p.R_AUTH_FAILED, 0x05)
+        self.assertNotIn(p.R_AUTH_REQUIRED, (0x01, 0x02, 0x03, 0xFF))
+        self.assertNotIn(p.R_AUTH_FAILED, (0x01, 0x02, 0x03, 0xFF))
+
     def test_frame_header_matches_daemon_format(self):
         frame = p.encode_frame(0x02, b"12345678")
         # [u16 LE toplam][u8 tip][gövde]

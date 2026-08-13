@@ -46,7 +46,8 @@ object PairingCrypto {
     /**
      * `SecureRandom` — `kotlin.random.Random` DEĞİL.
      *
-     * `kotlin.random.Random` XorWiro tabanlıdır ve kriptografik değildir;
+     * `kotlin.random.Random`'ın stdlib uygulaması Marsaglia'nın **xorwow**
+     * algoritmasıdır (sınıf adı `XorWowRandom`) ve kriptografik değildir;
      * birkaç çıktıdan iç durumu çıkarılabilir. Nonce tahmin edilebilir olursa
      * challenge-response'un getirdiği güvencenin bir kısmı kaybolur.
      */

@@ -25,11 +25,23 @@ from hashlib import sha256
 # ── Protokol sabitleri ───────────────────────────────────────────────
 #
 # Çerçeve biçimi vpad_daemon.py ile aynı: [u16 LE uzunluk][u8 tip][gövde].
-# Aşağıdakiler o dosyadaki tip tablosuna EKLENEN değerler; 0x20 ve üstü
-# bilinçli seçildi, mevcut 0x01..0x12 aralığıyla çakışmıyor.
+#
+# Tip baytlarının kayıt defteri `docs/companion-daemon.md` §4'tür —
+# `vpad_daemon.py` DEĞİL. Fark kritik: daemon yalnızca UYGULADIĞI tipleri
+# tanımlar, spec ise ileride kullanılacakları da AYIRIR. Bu dosyanın ilk
+# sürümü yalnızca daemon'a bakıp CHALLENGE'ı 0x20'ye koymuştu; oysa spec
+# 0x20'yi RUMBLE'a ayırmış (S→C, 2 bayt, v3'e ertelenmiş) ve sahadaki iOS
+# istemcisi de öyle biliyor (`ios/Runner/FrameCodec.swift`: "0x20 RUMBLE is
+# v3, intentionally not implemented in Phase 1"). Aynı bayt iki anlama
+# gelemez.
+#
+# Yeni kodlar spec'in kendi yön bloklarındaki ilk boş yerlere oturuyor:
+#   S→C: 0x10 HELLO_ACK · 0x11 REJECT · 0x12 PONG   → sıradaki boş 0x13
+#   C→S: 0x01 HELLO · 0x02 REPORT · 0x03 PING
+#        0x04 BYE · 0x05 MOUSE                      → sıradaki boş 0x06
 
-T_CHALLENGE = 0x20  # host → istemci: 16 bayt challenge
-T_AUTH = 0x21       # istemci → host: 16 bayt nonce + 32 bayt mac
+T_CHALLENGE = 0x13  # host → istemci: 16 bayt challenge
+T_AUTH = 0x06       # istemci → host: 16 bayt nonce + 32 bayt mac
 
 # vpad_daemon.py'deki karşılıkları — bu modül daemon'ı içe aktarmadığı için
 # burada da tanımlı. Değerler DEĞİŞTİRİLEMEZ, iki dosya aynı teli konuşuyor.
@@ -127,6 +139,12 @@ def is_lan_ipv4(text: str) -> bool:
     Yalnızca IPv4 literal kabul edilir. Alan adı verilirse False döner —
     çözümleme YAPILMAZ, çünkü DNS'e sormak tam olarak kapatmak istediğimiz
     kapıdır (kötü niyetli QR + DNS rebinding).
+
+    **Asgari Python 3.9.5 (veya 3.8.12).** Baştaki sıfırı olan sekizliler
+    (`192.168.010.1`) ancak o sürümlerden itibaren reddediliyor; öncesinde
+    `ipaddress` sıfırları kırpıp adresi kabul ediyordu (CVE-2021-29921).
+    Kotlin tarafındaki `PairingPayload.parseIpv4` her zaman reddettiği için,
+    daha eski bir Python'da iki uygulama aynı payload'a farklı cevap verir.
     """
     try:
         addr = ipaddress.IPv4Address(text)

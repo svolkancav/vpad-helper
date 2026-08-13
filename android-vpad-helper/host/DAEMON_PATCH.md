@@ -128,7 +128,9 @@ hata **atmaz**, elle girilebilecek metni döndürür. Kalıcı çözüm için
 qrcode>=7.4
 ```
 
-`qrcode` görüntü çıktısı için Pillow ister; Pillow zaten bağımlılıklarda.
+Pillow'a **ihtiyaç yok**: `render_qr_terminal` yalnızca `get_matrix()` çağırıp
+ANSI metin basıyor, hiç görüntü üretmiyor. (Kütüphanenin kendi README'si:
+standart kurulum PNG için `pypng` kullanır, Pillow `qrcode[pil]` ekstrasıdır.)
 
 ---
 

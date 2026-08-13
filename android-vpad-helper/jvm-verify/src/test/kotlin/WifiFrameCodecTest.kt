@@ -10,6 +10,49 @@ import kotlin.test.assertTrue
 
 class WifiFrameCodecTest {
 
+    // ── Tip kodu kayıt defteri (GERİLEME TESTİ) ─────────────────────
+
+    @Test
+    fun `tip kodlari spec kayit defteriyle ayni ve cakismiyor`() {
+        // GERİLEME: CHALLENGE bir ara `0x20`'ye konmuştu. Gerekçe "çalışan
+        // daemon'ın tablosunda 0x20 yok" idi — doğru ama yetersiz: kayıt
+        // defteri `docs/companion-daemon.md` §4 ve orası `0x20`'yi RUMBLE'a
+        // (S→C, 2 bayt, v3) AYIRMIŞ; iOS istemcisi de öyle biliyor.
+        //
+        // Bu testin varlık sebebi, diğer testlerin bu hatayı GÖREMEMESİ:
+        // hepsi sabitleri sembolik kullanıyor, yani yanlış bir değer
+        // atansa bile tek bir test bile kırılmaz. Burada kodlar telde
+        // oldukları hâliyle çivileniyor.
+        assertEquals(0x01, WifiFrameCodec.T_HELLO)
+        assertEquals(0x02, WifiFrameCodec.T_REPORT)
+        assertEquals(0x03, WifiFrameCodec.T_PING)
+        assertEquals(0x04, WifiFrameCodec.T_BYE)
+        assertEquals(0x10, WifiFrameCodec.T_HELLO_ACK)
+        assertEquals(0x11, WifiFrameCodec.T_REJECT)
+        assertEquals(0x12, WifiFrameCodec.T_PONG)
+        assertEquals(0x13, WifiFrameCodec.T_CHALLENGE)
+        assertEquals(0x06, WifiFrameCodec.T_AUTH)
+
+        // Spec'in sahiplendiği kodlar — eşleşme katmanı bunlara giremez.
+        val reserved = mapOf(
+            0x01 to "HELLO", 0x02 to "REPORT", 0x03 to "PING", 0x04 to "BYE",
+            0x05 to "MOUSE", 0x10 to "HELLO_ACK", 0x11 to "REJECT",
+            0x12 to "PONG", 0x20 to "RUMBLE (v3, companion-daemon.md §4)",
+        )
+        for (code in listOf(WifiFrameCodec.T_CHALLENGE, WifiFrameCodec.T_AUTH)) {
+            assertNull(
+                reserved[code],
+                "eşleşme tipi 0x${code.toString(16)} zaten " +
+                    "${reserved[code]} için ayrılmış",
+            )
+        }
+
+        // REJECT sebepleri de spec'in kullandıklarıyla çakışmamalı
+        // (0x01 · 0x02 · 0x03 · 0xff).
+        assertEquals(0x04, WifiFrameCodec.R_AUTH_REQUIRED)
+        assertEquals(0x05, WifiFrameCodec.R_AUTH_FAILED)
+    }
+
     // ── Çerçeve başlığı ─────────────────────────────────────────────
 
     @Test

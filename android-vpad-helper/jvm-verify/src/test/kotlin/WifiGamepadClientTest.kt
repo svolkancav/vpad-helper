@@ -17,6 +17,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -267,6 +268,104 @@ class WifiGamepadClientTest {
         } finally {
             client.close()
         }
+    }
+
+    // ── Kapanışla yarış (GERİLEME TESTİ) ────────────────────────────
+
+    @Test
+    fun `kalp atisi kapanisla yarissa da istisna sizdirmaz`() {
+        // GERİLEME — bu testin varlık sebebi Android'e özgü:
+        //
+        // Kalp atışı `write()` çağırıyordu; `write()` bağlantı kapalıyken
+        // WifiProtocolException atıyor ve o bir RuntimeException. Döngü
+        // yalnızca InterruptedException ve IOException yakalıyordu, yani
+        // close() ile yarışıldığında istisna iş parçacığından KAÇIYORDU.
+        //
+        // Saf JVM'de kaçan istisna sadece o thread'i öldürür. Android'de ise
+        // RuntimeInit.commonInit(), KillApplicationHandler'ı
+        // Thread.setDefaultUncaughtExceptionHandler ile kuruyor — kendi
+        // handler'ı olmayan HER thread'i kapsar — ve o handler hangi
+        // thread'in attığına bakmadan Process.killProcess(myPid()) +
+        // System.exit(10) çağırıyor. Yani boşta bekleyen bir kumandanın
+        // kalp atışı, oyunun ortasında tüm uygulamayı kapatabilirdi.
+        //
+        // Test tam olarak o Android davranışını taklit ediyor: varsayılan
+        // handler'a düşen her şeyi kaydediyor.
+        val escaped = Collections.synchronizedList(mutableListOf<Throwable>())
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            if (thread.name.startsWith("vpad-")) escaped.add(error)
+            else previous?.uncaughtException(thread, error)
+        }
+        val token = PairingCrypto.randomToken()
+        val h = host(token)
+        val client = WifiGamepadClient("Yaris")
+        try {
+            client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 40)
+
+            // Yarışı beklemek yerine ONUN ÜRETTİĞİ DURUMU kuruyoruz: close()
+            // akışında `output` alanı `socket`ten önce ve writeLock DIŞINDA
+            // null'lanır, yani kalp atışının "bağlantı var" sanıp kapalı akışa
+            // yazmaya kalktığı bir pencere gerçekten var. Tekrara dayalı bir
+            // stres testi bu pencereyi güvenilir biçimde yakalayamıyordu
+            // (kusurlu kodda 60 turda bir kez bile düşmedi), o yüzden durum
+            // doğrudan kuruluyor.
+            //
+            // Alan adı değişirse bu test NoSuchFieldException ile gürültülü
+            // biçimde kırılır — sessizce yeşile dönmez.
+            WifiGamepadClient::class.java.getDeclaredField("output").apply {
+                isAccessible = true
+                set(client, null)
+            }
+
+            Thread.sleep(250) // birkaç kalp atışı tiki geçsin
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+
+        // Kapanış da aynı pencerede: sonucu YAKALIYORUZ, çünkü `finally`
+        // içinden atılan bir istisna asıl bulguyu (escaped) maskeler.
+        val closeError = runCatching { client.close() }.exceptionOrNull()
+
+        assertTrue(escaped.isEmpty(), "kalp atışından istisna kaçtı: $escaped")
+        assertNull(closeError, "close() istisna sızdırdı: $closeError")
+    }
+
+    @Test
+    fun `es zamanli close istisna sizdirmaz`() {
+        // Aynı kusurun ikinci yüzü: close() "hata yutulur" diye belgeli ama
+        // yalnızca IOException yakalıyordu. İki iş parçacığı aynı anda
+        // kapatırsa ikincisi `socket == null` denetimini geçtikten sonra
+        // soketi kapanmış bulur ve write() ona da RuntimeException atar.
+        //
+        // Bu test GERÇEK eşzamanlılık kullanır, o yüzden olasılıksaldır
+        // (kusurlu kodda ~5 turda 1 düşüyordu). Kusurun deterministik
+        // karşılığı `kalp atisi kapanisla yarissa da istisna sizdirmaz`
+        // içindeki `closeError` denetimidir; bu ise onun tamamlayıcısı:
+        // iki gerçek iş parçacığının close() üzerinde çarpışmasını sınar.
+        val token = PairingCrypto.randomToken()
+        val h = host(token)
+        val escaped = Collections.synchronizedList(mutableListOf<Throwable>())
+
+        repeat(40) {
+            val client = WifiGamepadClient("Cift Kapanis")
+            client.connect(h.info(token), pairWaitMs = 1_000, heartbeatMs = 0)
+            val gate = java.util.concurrent.CyclicBarrier(2)
+            val threads = List(2) {
+                Thread {
+                    gate.await()
+                    try {
+                        client.close()
+                    } catch (t: Throwable) {
+                        escaped.add(t)
+                    }
+                }
+            }
+            threads.forEach { it.start() }
+            threads.forEach { it.join(3_000) }
+        }
+
+        assertTrue(escaped.isEmpty(), "close() çağırana istisna sızdırdı: $escaped")
     }
 
     // ── Yeniden kullanım (GERİLEME TESTİ) ───────────────────────────

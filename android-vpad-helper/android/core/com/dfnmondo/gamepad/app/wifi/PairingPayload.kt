@@ -58,7 +58,15 @@ object PairingPayload {
      * `InetAddress.getByName` **DNS çözümlemesi yapar** — tam olarak kapatmak
      * istediğimiz kapı o. Ayrıca baştaki sıfırı olan sekizliler (`192.168.01.1`)
      * bazı kütüphanelerde sekizlik sayı olarak yorumlanır; burada doğrudan
-     * reddediliyor, Python tarafı da öyle yapıyor.
+     * reddediliyor.
+     *
+     * Python tarafı da reddeder — **ama yalnızca 3.9.5 / 3.8.12'den itibaren.**
+     * O sürümlerden önce `ipaddress` baştaki sıfırları kırpıp adresi kabul
+     * ediyordu (CVE-2021-29921); belgedeki not aynen şöyle: *"Changed in
+     * version 3.9.5: Leading zeros are no longer tolerated and are treated as
+     * an error."* Daemon daha eski bir Python'da koşarsa iki taraf aynı
+     * payload'a farklı cevap verir — pratikte host kendi adresini üretip
+     * yayınladığı için tetiklenmesi zor, ama parite iddiası o eşiğe bağlı.
      */
     fun isLanIpv4(text: String): Boolean {
         val octets = parseIpv4(text) ?: return false

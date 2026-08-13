@@ -3,7 +3,7 @@
 Bu paket **hiçbir mevcut dosyaya dokunmaz.** Aşağıdakiler, WiFi + QR
 eşleşmesini uygulamaya eklemek için yapılacakların tam listesidir.
 
-Ön koşul: `core/` altındaki dört dosya **JVM'de derlenmiş ve 45 testle
+Ön koşul: `core/` altındaki dört dosya **JVM'de derlenmiş ve 52 testle
 doğrulanmış** durumda (`jvm-verify/`). `ui/` altındakiler Android'e özgü
 olduğu için ancak uygulama içinde derlenir.
 
@@ -90,15 +90,25 @@ kapanır ve sonuç `Result.Rejected` olarak döner. "Ekran açık kalsın, sebep
 satır içinde yazsın" akışı mümkün değil — kullanıcıya mesajı gösterip **tek
 dokunuşla tekrar denenebilen** bir düğme bırakın.
 
-### İleriye dönük tuzak
+### İleriye dönük tuzak — analojiye dayanıyor, Google belgelemiyor
 
-Uygulama `CAMERA` iznini **başka bir sebeple** manifest'e eklerse bu muafiyet
-kaybolur: Android, kullanıcının reddettiği bir izni vekil üzerinden aşmayı
-engeller, o yüzden "beyan edilmiş ama verilmemiş" durumunda devretme yolu da
-kapanır. Mevcut manifest'te `CAMERA` yok (doğrulandı). İleride kamera
-gerektiren bir özellik eklenirse burası yeniden değerlendirilmeli;
-`CodeScannerPairing` bu durumu `CODE_SCANNER_CAMERA_PERMISSION_NOT_GRANTED`
-dalıyla ele alıyor ve sebebi mesajda söylüyor.
+Uygulama `CAMERA` iznini **başka bir sebeple** manifest'e eklerse bu muafiyetin
+kaybolması beklenir: Android, kullanıcının reddettiği bir izni vekil üzerinden
+aşmayı engeller. Bunun **belgelenmiş** örneği `MediaStore.ACTION_IMAGE_CAPTURE`:
+*"if your app targets M and above and declares as using the CAMERA permission
+which is not granted, then attempting to use this action will result in a
+SecurityException."* Aynı kuralın code scanner için de geçerli olduğu Google
+tarafından **hiçbir yerde yazılmıyor** — yani bu bir tahmin, kanıt değil.
+
+Ölçülü davranmak yine de doğru: mevcut manifest'te `CAMERA` yok (doğrulandı),
+ileride kamera gerektiren bir özellik eklenirse burası **cihazda** yeniden
+sınanmalı.
+
+Ayrıca `CODE_SCANNER_CAMERA_PERMISSION_NOT_GRANTED` (202) kodunu bu tuzağın
+göstergesi saymayın: Google onu *"Camera permission is not granted to Google
+Play Service"* diye tanımlıyor, yani asıl beklenen sebep kullanıcının **Play
+services'in** kamera iznini kapatmış olması — sizin manifest'inizde hiçbir şey
+olmasa da gelir.
 
 ### Değişmeyen kural
 
@@ -241,6 +251,12 @@ Kotlin tarafında yazılacak tek yeni şey `WifiChannelHandler`:
    gönderimde öğrenirsiniz. Gerileme testi:
    `bosta kalan baglanti kalp atisiyla canli kalir`.
 
+   Kalp atışı iş parçacığı ayrıca **hiçbir istisna sızdırmaz**: Android'de
+   oradan kaçan tek bir istisna `KillApplicationHandler`'a gider ve süreci
+   öldürür. Yazma yolunu (`writeIfOpen`) ve döngünün `catch (Throwable)`
+   ağını kaldırmayın; gerileme testi:
+   `kalp atisi kapanisla yarissa da istisna sizdirmaz`.
+
 ---
 
 ## 6. Flutter katmanı
@@ -264,6 +280,11 @@ bağlanabilir; iki durum modeli bilinçli olarak birleştirilmedi, gerekçesi
 `rejectReasonKey(reason)` sabit anahtarlar döndürür
 (`pairing_failed`, `host_busy`, …) — bunlar `Strings.kt`'ye eklenip 13 dile
 çevrilecek metinlerin anahtarlarıdır.
+
+Taşıyıcı seçim ekranının tasarım maketi: `../host-connection-mockup.png`
+(WiFi / Bluetooth ikili seçimi, uygulamanın görsel diliyle). Üretim brief'i
+ve uygulamaya geçerken dikkat edilecekler:
+`../host-connection-mockup.prompt.md`.
 
 ---
 
@@ -293,7 +314,7 @@ Bu sırayla ilerleyin; her adım bir öncekini varsayar:
    --press A --hold 2` — host'ta A tuşuna basılı raporlar görünmeli. Bu
    adım host tarafının doğru olduğunu kanıtlar.
 
-3. **Kotlin çekirdeğini sına.** `jvm-verify/` içinde `gradle test` — 45 test
+3. **Kotlin çekirdeğini sına.** `jvm-verify/` içinde `gradle test` — 52 test
    geçmeli. Bu adım Kotlin tarafının Python ile aynı teli konuştuğunu
    kanıtlar (altın vektör testi).
 

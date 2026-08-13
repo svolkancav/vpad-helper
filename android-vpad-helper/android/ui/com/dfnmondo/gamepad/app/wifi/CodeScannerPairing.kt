@@ -24,11 +24,17 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
  * koymuyoruz, çalışma zamanı izin diyaloğu göstermiyoruz, izin reddi yolunu
  * kodlamıyoruz.
  *
- * > **Tuzak:** uygulama `CAMERA` iznini başka bir sebeple manifest'te beyan
- * > ederse bu muafiyet KAYBOLUR — Play services o durumda iznin verilmiş
- * > olmasını şart koşar. `gamepad_universal`'ın manifest'inde `CAMERA` yok
- * > (doğrulandı), bu yüzden şu an sorun değil; ileride kamera gerektiren
- * > başka bir özellik eklenirse burası tekrar gözden geçirilmeli.
+ * > **Muhtemel tuzak (Google belgelemiyor):** uygulama `CAMERA` iznini başka
+ * > bir sebeple manifest'te beyan eder ve izin verilmemiş olursa bu muafiyetin
+ * > kaybolması beklenir. Dayanak, aynı devretme kalıbının belgelenmiş hâli:
+ * > `MediaStore.ACTION_IMAGE_CAPTURE` için Android, *"if your app targets M
+ * > and above and declares as using the CAMERA permission which is not
+ * > granted, then attempting to use this action will result in a
+ * > SecurityException"* diyor. Code scanner için Google aynı kuralı hiçbir
+ * > yerde yazmıyor, yani bu **analojiye dayalı bir tahmin** — ama ucuz bir
+ * > tedbir. `gamepad_universal`'ın manifest'inde `CAMERA` yok (doğrulandı);
+ * > ileride kamera gerektiren bir özellik eklenirse burası cihazda yeniden
+ * > sınanmalı.
  *
  * ## Bunun karşılığında kaybedilen
  *
@@ -181,9 +187,16 @@ object CodeScannerPairing {
             MlKitException.CODE_SCANNER_GOOGLE_PLAY_SERVICES_VERSION_TOO_OLD ->
                 Result.Unavailable("Google Play services sürümü eski")
             MlKitException.CODE_SCANNER_CAMERA_PERMISSION_NOT_GRANTED ->
-                // Yalnızca uygulama CAMERA iznini manifest'te beyan ettiyse
-                // görülür — sınıf KDoc'undaki tuzak.
-                Result.Failed("kamera izni verilmedi (manifest'te CAMERA beyan edilmiş)")
+                // Google bu kodu (202) şöyle tanımlıyor: "Camera permission is
+                // not granted to Google Play Service." Yani asıl beklenen
+                // sebep, kullanıcının PLAY SERVICES'in kamera iznini
+                // kapatmış olması — bizim manifest'imizde hiçbir şey
+                // olmasa bile gelir. Sınıf KDoc'undaki "beyan edilmiş CAMERA"
+                // tahmini ikinci bir ihtimal; mesaj ikisini de karşılasın.
+                Result.Failed(
+                    "kamera izni verilmedi — Ayarlar'da Google Play services'in " +
+                        "kamera iznini açın",
+                )
             else -> Result.Failed("tarama hatası (kod ${error.errorCode})")
         }
     }

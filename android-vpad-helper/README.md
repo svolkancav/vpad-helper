@@ -40,7 +40,7 @@ Tasarımın tamamı, gerekçeleri ve tehdit modeli: **[DESIGN.md](DESIGN.md)**
 | Rapor uyumu | 8 baytlık REPORT, `HidReportSender`'ın ürettiğiyle **birebir** |
 | Geriye uyum | `--pair` verilmezse daemon bugünkü davranışını korur |
 | Boşta kalma | 2 sn'de bir kalp atışı — host'un 10 sn'lik zaman aşımına karşı |
-| Test | **30 Python + 9 uçtan uca + 49 Kotlin = 88**, hepsi geçiyor |
+| Test | **31 Python + 9 uçtan uca + 52 Kotlin = 92**, hepsi geçiyor |
 
 Kritik ayrıntı: `vpad_daemon.py`'nin 8 baytlık REPORT gövdesi zaten
 `HidReportSender.kt`'nin Bluetooth'a yazdığı 8 baytın aynısıydı — buton
@@ -58,7 +58,7 @@ android-vpad-helper/
 ├── host/                      ── Python tarafı (çalışır ve test edilir)
 │   ├── vpad_pairing.py        token · payload · QR · HMAC · LAN kuralı
 │   ├── vpad_reference_client.py  çalışan istemci + yürütülebilir şartname
-│   ├── test_vpad_pairing.py   28 birim testi
+│   ├── test_vpad_pairing.py   31 birim testi
 │   ├── test_e2e_pairing.py    9 uçtan uca test (gerçek soket)
 │   └── DAEMON_PATCH.md        vpad_daemon.py'ye uygulanacak değişiklikler
 ├── android/
@@ -128,9 +128,9 @@ dene → ancak sonra rapor hunisini bağla.
 
 | Katman | Durum |
 |---|---|
-| Host eşleşme mantığı | ✅ 28 birim testi |
+| Host eşleşme mantığı | ✅ 31 birim testi |
 | Host uçtan uca (gerçek soket) | ✅ 9 test |
-| Kotlin çekirdek | ✅ 45 test, gerçek soket dahil |
+| Kotlin çekirdek | ✅ 52 test, gerçek soket dahil |
 | Python ↔ Kotlin protokol sözleşmesi | ✅ altın vektör (aynı HMAC baytları) |
 | Android tarafı (`ui/`) | ✅ **derlendi** — AGP 8.13.2, SDK 36, minSdk 31 |
 | Gerçek telefon → gerçek host | ❌ **denenmedi** — fiziksel cihaz gerekir |

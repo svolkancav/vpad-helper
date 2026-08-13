@@ -233,7 +233,14 @@ class WifiGamepadClient(
         }
     }
 
-    /** Nötr rapor + BYE gönderip soketi kapatır. Hata yutulur. */
+    /**
+     * Nötr rapor + BYE gönderip soketi kapatır. **Hiçbir istisna sızdırmaz.**
+     *
+     * Bu söz ciddiye alınmalı: `close()` çoğu zaman bir `finally` bloğundan
+     * veya yaşam döngüsü geri çağrısından çağrılır; oradan kaçan bir istisna
+     * ya asıl hatayı maskeler ya da (arka plan iş parçacığındaysa) süreci
+     * öldürür — bkz. [startHeartbeat].
+     */
     fun close() {
         if (socket == null) return
         stopHeartbeat()
@@ -242,6 +249,11 @@ class WifiGamepadClient(
             write(WifiFrameCodec.encodeFrame(WifiFrameCodec.T_BYE))
         } catch (_: IOException) {
             // Kapanışta yazma hatası beklenen bir şey; bastırılıyor.
+        } catch (_: WifiProtocolException) {
+            // `socket == null` denetimini geçtikten sonra başka bir iş
+            // parçacığı kapatmış olabilir (iki kez close, ya da connect
+            // hatasının temizliğiyle çakışma). Vedalaşamamak kapanışı
+            // engellemez.
         }
         closeQuietly()
         if (state !is WifiConnectionState.Rejected) {
@@ -269,6 +281,20 @@ class WifiGamepadClient(
      *
      * Trafik akarken sessizdir: son yazmanın üzerinden [intervalMs] geçmediyse
      * hiçbir şey göndermez.
+     *
+     * ## Buradan hiçbir istisna kaçamaz — sebebi Android'e özgü
+     *
+     * `RuntimeInit.commonInit()`, `KillApplicationHandler`'ı
+     * `Thread.setDefaultUncaughtExceptionHandler` ile kuruyor: kendi
+     * handler'ı olmayan **her** iş parçacığını kapsar ve hangi thread'in
+     * attığına bakmadan `Process.killProcess(myPid())` + `System.exit(10)`
+     * çağırır. Yani bu döngüden kaçan tek bir istisna, kullanıcı kumandaya
+     * dokunmuyorken bile tüm uygulamayı kapatır — üstelik yığın izi
+     * kullanıcının yaptığı hiçbir şeyi göstermez.
+     *
+     * Bu yüzden burada iki katman var: yazma [writeIfOpen] ile yapılır
+     * (kapanışla yarışmak istisna üretmez) ve döngü yine de her şeyi
+     * yakalar.
      */
     private fun startHeartbeat(intervalMs: Long) {
         stopHeartbeat()
@@ -278,9 +304,11 @@ class WifiGamepadClient(
                     Thread.sleep(intervalMs / 2)
                     val frame = lastReportFrame ?: continue
                     val idleFor = System.currentTimeMillis() - lastWriteAtMs
-                    if (idleFor >= intervalMs) {
-                        write(frame)
-                    }
+                    // [write] DEĞİL: close() `output`u [writeLock] dışında
+                    // null'ladığı için, kilidi bekleyip uyandığımızda
+                    // bağlantı kapanmış olabilir. Bu bir hata değil, kapanış
+                    // sinyali — döngüyü bitir.
+                    if (idleFor >= intervalMs && !writeIfOpen(frame)) break
                 }
             } catch (_: InterruptedException) {
                 // close() istedi; sessizce çık.
@@ -288,6 +316,13 @@ class WifiGamepadClient(
                 // Bağlantı zaten kopmuş. Hatayı burada yükseltmenin anlamı
                 // yok — çağıranın bir sonraki gönderimi aynı hatayı
                 // görecek ve durumu oradan yönetecek.
+            } catch (t: Throwable) {
+                // SON SAVUNMA HATTI. Buraya düşmek bir hatadır; ama uygulamayı
+                // öldürmek (yukarıdaki KDoc) ile sessizce yutmak arasındaki
+                // doğru yer, görülebilir biçimde ölmektir. Bu dosya Android
+                // API'si kullanmadığı için `Log` yok; `System.err` Android'de
+                // logcat'e düşer, JVM testlerinde de görünür.
+                System.err.println("vpad: kalp atışı beklenmedik şekilde durdu — $t")
             }
         }, "vpad-wifi-heartbeat")
         thread.isDaemon = true
@@ -313,15 +348,42 @@ class WifiGamepadClient(
         output = null
     }
 
+    /**
+     * Çerçeveyi yazar; bağlantı kapalıysa [WifiProtocolException].
+     *
+     * Dikkat: o istisna **denetlenmeyen** (RuntimeException), yani
+     * `@Throws(IOException::class)` imzasına bakıp yalnızca `IOException`
+     * yakalayan bir çağıran onu ıskalar. Çağıran bir arka plan iş
+     * parçacığındaysa bu, Android'de sürecin ölümü demektir — bkz.
+     * [startHeartbeat]. Kapanmış bağlantıya yazma ihtimali olan yerler
+     * [writeIfOpen] kullanmalı.
+     */
     @Throws(IOException::class)
     private fun write(bytes: ByteArray) {
-        // Kalp atışı iş parçacığı ile çağıranın yazması araya girmemeli:
-        // yarım yazılmış iki çerçeve teli bozar.
+        if (!writeIfOpen(bytes)) throw WifiProtocolException("bağlantı yok")
+    }
+
+    /**
+     * Bağlantı açıksa yazar ve `true`, kapalıysa hiçbir şey yapmadan `false`
+     * döner.
+     *
+     * "Bağlantı yok" durumunu istisna yerine **sonuç** olarak bildirmesi
+     * bilinçli: [close] akışında `output` alanı [writeLock] dışında
+     * null'lanıyor, dolayısıyla kilidi bekleyen bir yazıcının uyandığında
+     * bağlantıyı kapanmış bulması NORMAL bir yarış sonucudur, hata değil.
+     *
+     * Yazmalar [writeLock] üzerinden serileştirilir: kalp atışı iş parçacığı
+     * ile çağıranın yazması araya girerse yarım yazılmış iki çerçeve teli
+     * bozar.
+     */
+    @Throws(IOException::class)
+    private fun writeIfOpen(bytes: ByteArray): Boolean {
         synchronized(writeLock) {
-            val out = output ?: throw WifiProtocolException("bağlantı yok")
+            val out = output ?: return false
             out.write(bytes)
             out.flush()
             lastWriteAtMs = System.currentTimeMillis()
+            return true
         }
     }
 

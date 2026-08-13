@@ -102,10 +102,10 @@ istemci                                        host
    │                                            │
    │────────────── TCP connect ────────────────>│
    │                                            │
-   │<──────── CHALLENGE (0x20) ─────────────────│   16 rastgele bayt
+   │<──────── CHALLENGE (0x13) ─────────────────│   16 rastgele bayt
    │                                            │   (her bağlantıda YENİ)
    │                                            │
-   │───────── AUTH (0x21) ─────────────────────>│   nonce(16) ‖ mac(32)
+   │───────── AUTH (0x06) ─────────────────────>│   nonce(16) ‖ mac(32)
    │                                            │
    │                                       doğrula:
    │                                       compare_digest(mac, beklenen)
@@ -165,10 +165,35 @@ Eklenen tipler ve sebep kodları:
 
 | Sabit | Değer | Yön | Gövde |
 |---|---|---|---|
-| `T_CHALLENGE` | `0x20` | host → istemci | 16 bayt challenge |
-| `T_AUTH` | `0x21` | istemci → host | 16 bayt nonce + 32 bayt mac |
+| `T_CHALLENGE` | `0x13` | host → istemci | 16 bayt challenge |
+| `T_AUTH` | `0x06` | istemci → host | 16 bayt nonce + 32 bayt mac |
 | `R_AUTH_REQUIRED` | `0x04` | REJECT sebebi | eşleşme açık ama AUTH gelmedi |
 | `R_AUTH_FAILED` | `0x05` | REJECT sebebi | MAC uyuşmadı |
+
+### Kodlar neden bunlar — ve 0x20 neden değil
+
+Tip baytlarının kayıt defteri **`docs/companion-daemon.md` §4**, çalışan
+`vpad_daemon.py` değil. Aradaki fark bir tuzak: daemon yalnızca *uyguladığı*
+tipleri tanımlar, spec ise ileride kullanılacakları da **ayırır**.
+
+Bu belgenin ilk sürümü yalnızca daemon'ın tablosuna (`0x01..0x12`) bakıp
+`0x20`'yi boş sanmıştı. Değil: spec `0x20`'yi **RUMBLE**'a ayırmış (host →
+istemci, 2 bayt, v3'e ertelenmiş) ve sahadaki iOS istemcisi de öyle biliyor —
+`ios/Runner/FrameCodec.swift`: *"0x20 RUMBLE is v3, intentionally not
+implemented in Phase 1."* İki tanım da aynı yönde olduğu için ayırt edilemezdi;
+rumble geldiği gün aynı bayt iki anlama gelirdi.
+
+Yeni kodlar spec'in kendi yön bloklarındaki ilk boş yerler:
+
+```
+S→C : 0x10 HELLO_ACK · 0x11 REJECT · 0x12 PONG                → 0x13 CHALLENGE
+C→S : 0x01 HELLO · 0x02 REPORT · 0x03 PING · 0x04 BYE · 0x05 MOUSE → 0x06 AUTH
+```
+
+REJECT sebepleri `0x04`/`0x05` çakışmıyor: spec `0x01` `0x02` `0x03` `0xff`
+kullanıyor. Yalnız iOS'un `RejectReason` enum'ı kapalı olduğu için bilinmeyen
+sebebi `nil`'e çözer — eşleşmeli bir host'a bağlanan eski bir iOS istemcisi
+"QR'ı tara" mesajını değil jenerik bir hata görür.
 
 **Geriye uyum:** `--pair` verilmezse host CHALLENGE göndermez ve akış bugünkünün
 birebir aynısı kalır. Mevcut iPhone istemcisi etkilenmez.
