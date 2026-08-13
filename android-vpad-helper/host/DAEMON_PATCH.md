@@ -150,9 +150,11 @@ sunucu tarafında zorunlu.
 
 ## 7. (Opsiyonel) Çoklu oyuncu — 4 telefon
 
-Tasarım ve gerekçeler: `docs/wifi-transport-architecture.md` §10. Bu bölüm
-**bağımsızdır**: eşleşme yaması olmadan da uygulanabilir, uygulanmazsa daemon
-tek oyunculu kalır.
+Tasarım ve gerekçeler: `docs/wifi-transport-architecture.md` §10.
+
+**Önkoşul: §1'deki `import vpad_pairing as pairing` satırı.** Slot çerçevesi
+`pairing.encode_slot()` ile üretiliyor. Eşleşmeyi açmak zorunda değilsiniz
+(`--pair` vermeyin, kapalı kalır) ama modül içe aktarılmış olmalı.
 
 **Varsayılan 1.** `--players` verilmezse davranış bugünküyle birebir aynıdır —
 `--pair` ile aynı disiplin.
@@ -172,17 +174,38 @@ import vpad_slots as slots
 
 ### 7.2 Modül düzeyindeki kilit yerine havuz
 
-`_active_lock` / `_active_peer` ikilisi kalkar:
+`_active_lock`, `_active_peer` ve `handle_client`'ın ilk satırındaki
+`global _active_peer` **üçü birden** silinir.
+
+Havuz modül değişkeni **yapılmaz**. Sebep: `injector` bugün `main()` içinde
+kurulup thread argümanı olarak geçiriliyor; havuzu global yapmak hem bu
+desenle çelişir hem de `main()` içindeki atama modül değişkenini değil yerel
+bir adı yazar (Python'un kapsam kuralı) — `handle_client` eski havuzu görürdü.
+Aynı yoldan geçir:
 
 ```python
-_slots = slots.SlotPool(1)   # main() içinde args.players ile yeniden kurulur
+    # main(): mevcut `injector = build_injector(...)` satırının yerine
+    pool = slots.SlotPool(args.players)
+    injectors = [injector]                       # zaten kurulmuş olan ilki
+    for _ in range(args.players - 1):            # players=1 ise hiç dönmez
+        injectors.append(build_injector(args.inject, args.verbose,
+                                        args.mouse_speed))
 ```
 
-`main()` içinde, injector seçildikten sonra:
+> İlk enjektörü yeniden kurmuyoruz: `build_injector` tanı satırları basıyor ve
+> ViGEmBus yoksa uyarı veriyor; dört kez çağırmak aynı mesajı dörtlüyor.
+
+`accept()` döngüsündeki thread argümanlarına ikisi de eklenir:
 
 ```python
-    _slots = slots.SlotPool(args.players)
-    injectors = [make_injector(args.inject) for _ in range(args.players)]
+                args=(client, addr, injectors, args.verbose, pool),
+```
+
+ve imza buna göre genişler:
+
+```python
+def handle_client(client: socket.socket, addr, injectors: list[Injector],
+                  verbose: bool, pool: "slots.SlotPool") -> None:
 ```
 
 > **macOS istisnası.** `MacKbmInjector` klavye/fare öykünmesi yapıyor; dört
@@ -194,12 +217,12 @@ _slots = slots.SlotPool(1)   # main() içinde args.players ile yeniden kurulur
 `_active_lock.acquire(...)` bloğunun yerine:
 
 ```python
-        lease = _slots.acquire(f"{pad_name} @ {addr[0]}")
+        lease = pool.acquire(f"{pad_name} @ {addr[0]}")
         if lease is None:
             client.sendall(encode_reject(
                 R_IN_USE,
-                f"all {_slots.size} player slots are in use"))
-            print(f"[{ts()}] ✗ refused — {_slots.size} slot dolu (in_use)")
+                f"all {pool.size} player slots are in use"))
+            print(f"[{ts()}] ✗ refused — {pool.size} slot dolu (in_use)")
             return
         injector = injectors[lease.index]
 ```
@@ -217,15 +240,38 @@ istemcinin **bloklamayan** slot tahliyesine denk düşer, yani "Oyuncu 2" rozeti
 ilk karede görünür. Gecikirse de kayıp değil — istemci onu sonraki okumada
 yakalar.
 
-`finally` bloğunda, `injector.reset()`'ten **sonra**:
+Mevcut `holding_lock = False` satırı (try'dan önce) şununla değişir:
 
 ```python
-        if lease is not None:
-            _slots.release(lease)
+    lease = None
 ```
 
-Sıra kritik: önce nötr, sonra slot serbest. Tersi, sonraki oyuncunun basılı
-bir tuşla başlaması demek.
+**Atlanamaz:** `lease` `try` içinde atanıyor ama `finally` içinde okunuyor.
+Sürüm uyuşmazlığı gibi erken dönüşlerde atama hiç çalışmaz ve `finally`
+`NameError` verir — üstelik asıl hatayı da maskeleyerek. Daemon'ın kendi
+`holding_lock = False` satırı zaten tam bu yüzden orada.
+
+`finally` bloğunun tamamı şu olur (mevcut `injector.reset()` ve
+`if holding_lock: …` blokları birlikte kalkar):
+
+```python
+    finally:
+        if lease is not None:
+            try:
+                injectors[lease.index].reset()   # önce nötr
+            except Exception:
+                pass
+            pool.release(lease)                  # sonra serbest
+```
+
+İki ayrıntı atlanamaz:
+
+- **Sıra:** önce nötr, sonra slot serbest. Tersi, o slotu devralan sonraki
+  oyuncunun basılı bir tuşla başlaması demek.
+- **`injector` artık `finally`'de kullanılamaz:** eskiden fonksiyon
+  parametresiydi, hep tanımlıydı. Şimdi `try` içinde
+  (`injector = injectors[lease.index]`) atanıyor, yani erken dönüşlerde hiç
+  var olmaz. Nötrleme bu yüzden lease üzerinden yapılıyor.
 
 ### 7.4 Neden slot'u host atıyor
 

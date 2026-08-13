@@ -38,8 +38,13 @@ T_PONG = 0x12
 class TestDaemon:
     """Eşleşme kapılı minik daemon. DAEMON_PATCH.md'deki akışın aynısı."""
 
-    def __init__(self, token: bytes | None):
+    def __init__(self, token: bytes | None, slot: int | None = None):
         self.token = token
+        # Çoklu oyuncu modu: HELLO_ACK ile AYNI `sendall` içinde gönderilir —
+        # gerçek daemon da öyle yapıyor (DAEMON_PATCH.md §7.3) ve hatanın
+        # ortaya çıktığı koşul tam olarak bu: tek `recv` iki çerçeveyi birden
+        # getiriyor.
+        self.slot = slot
         self.reports: list[bytes] = []
         self.hellos: list[str] = []
         self.rejections: list[int] = []
@@ -109,8 +114,11 @@ class TestDaemon:
                 return
             name_len = payload[1]
             self.hellos.append(payload[2:2 + name_len].decode("utf-8", "replace"))
-            conn.sendall(pairing.encode_frame(pairing.T_HELLO_ACK,
-                                              bytes([PROTO_VER, 1])))
+            ack = pairing.encode_frame(pairing.T_HELLO_ACK,
+                                       bytes([PROTO_VER, 1]))
+            if self.slot is not None:
+                ack += pairing.encode_slot(self.slot)   # tek yazım, bilinçli
+            conn.sendall(ack)
 
             while True:
                 msg_type, payload = reader.next_frame()
@@ -322,3 +330,31 @@ class BackwardCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class SlotTests(unittest.TestCase):
+    """GERİLEME: slot, HELLO_ACK ile AYNI paketten gelir.
+
+    Bu hata birim testlerinden kaçtı ve ancak yamalanmış gerçek daemon'a
+    karşı koşturunca göründü: `HELLO_ACK` okunurken tek bir `recv` iki
+    çerçeveyi birden getiriyor, yani SLOT için sokette okunacak bayt
+    KALMIYOR. İstemcinin bloklamayan tahliyesi önce sokete bakıp tamponu
+    atlıyordu; sonuç, host slot atadığı hâlde `client.slot is None`.
+    """
+
+    def test_slot_arrives_in_the_same_packet_as_hello_ack(self):
+        with TestDaemon(None, slot=2) as daemon:
+            info = pairing.parse_payload(daemon.payload())
+            with VPadClient(info, "Ucuncu Oyuncu") as client:
+                client.connect(pair_wait=0.4)
+                self.assertEqual(client.slot, 2,
+                                 "slot HELLO_ACK ile aynı pakette geldi ve "
+                                 "kaçırıldı")
+
+    def test_single_player_host_leaves_slot_none(self):
+        with TestDaemon(None) as daemon:
+            info = pairing.parse_payload(daemon.payload())
+            with VPadClient(info, "Tek") as client:
+                client.connect(pair_wait=0.4)
+                self.assertIsNone(client.slot,
+                                  "tek oyunculu host slot göndermez")

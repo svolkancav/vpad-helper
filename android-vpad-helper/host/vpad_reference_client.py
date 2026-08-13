@@ -89,6 +89,16 @@ class FrameReader:
         self._sock = sock
         self._buf = bytearray()
 
+    def take_buffered(self) -> tuple[int, bytes] | None:
+        """Tamponda tamamlanmış bir çerçeve varsa döner — **soketi okumaz**.
+
+        Bloklamayan tahliyenin ilk adımı. Tek bir `recv` birden fazla çerçeve
+        getirebilir (host `HELLO_ACK + SLOT`'u tek `sendall` ile yolluyor), o
+        yüzden "gelecek bir şey var mı" diye sokete bakmadan ÖNCE burada
+        birikeni almak gerekir. Kotlin karşılığı: `WifiFrameCodec.Decoder.poll`.
+        """
+        return self._take()
+
     def next_frame(self) -> tuple[int, bytes]:
         while True:
             frame = self._take()
@@ -211,9 +221,9 @@ class VPadClient:
                 # tamponumuzda bekleyen REJECT'i de SİLER. Sonuç, kullanıcının
                 # "yanlış QR" yerine ham "bağlantı sıfırlandı" görmesi.
                 # Bu yüzden HELLO'dan ÖNCE, bloklamadan bakıyoruz.
-                early = self._poll_frame()
-                if early is not None and early[0] == pairing.T_REJECT:
-                    self._raise_reject(early[1])
+                early = self._drain()
+                if early is not None:
+                    self._raise_reject(early)
             elif msg_type == pairing.T_REJECT:
                 self._raise_reject(payload)
             else:
@@ -240,6 +250,14 @@ class VPadClient:
         if msg_type == pairing.T_REJECT:
             self._raise_reject(payload)
 
+        # --- 3) Slot (çoklu oyuncu) ---
+        # Çoklu oyuncu modundaki host, HELLO_ACK ile SLOT'u aynı `sendall`da
+        # gönderiyor; yani ACK okunduğunda SLOT çoktan tamponda. `_read_until`
+        # ACK'te durduğu için onu ALMAZ — bloklamadan burada topluyoruz.
+        # Beklemiyoruz: tek oyunculu host hiç göndermez, beklemek herkese
+        # bedava gecikme yazdırırdı. Kotlin karşılığı: `connect()` §3.
+        self._drain()
+
     def _poll_frame(self) -> tuple[int, bytes] | None:
         """**Bloklamadan**: hâlihazırda gelmiş bir çerçeve varsa döner.
 
@@ -247,13 +265,39 @@ class VPadClient:
         bakar; yoksa anında None. Kotlin karşılığı:
         `WifiGamepadClient.drainBuffered`.
         """
+        reader = self._reader
+        if reader is None:
+            return None
+        # ÖNCE tampon: tek bir `recv` birden fazla çerçeve getirmiş olabilir
+        # ve o çerçeveler için sokette okunacak bayt KALMAZ — `select` boş
+        # döner, çerçeve de tamponda unutulurdu. (Bu sırayı ters yazmıştım;
+        # host'a karşı koşturunca SLOT hiç yakalanmadı.)
+        buffered = reader.take_buffered()
+        if buffered is not None:
+            return buffered
         sock = self._require_socket()
         if not select.select([sock], [], [], 0)[0]:
             return None
         try:
-            return self._reader.next_frame()  # type: ignore[union-attr]
+            return reader.next_frame()
         except (OSError, ProtocolError):
             return None
+
+    def _drain(self) -> bytes | None:
+        """Bloklamadan gelmiş çerçeveleri tüketir; ilk REJECT'in gövdesini döner.
+
+        `T_SLOT` yakalanır, tanınmayan tipler atılır. Kotlin karşılığı:
+        `WifiGamepadClient.drainBuffered`.
+        """
+        while True:
+            frame = self._poll_frame()
+            if frame is None:
+                return None
+            msg_type, payload = frame
+            if msg_type == pairing.T_REJECT:
+                return payload
+            if msg_type == pairing.T_SLOT and payload:
+                self.slot = payload[0]
 
     def _read_until(self, wanted: int) -> tuple[int, bytes]:
         """`wanted` (ya da REJECT) gelene kadar okur.
