@@ -63,6 +63,8 @@ import threading
 from contextlib import closing
 from datetime import datetime
 
+import vpad_slots as slots
+
 try:
     from zeroconf import IPVersion, ServiceInfo, Zeroconf
 except ImportError:
@@ -84,6 +86,11 @@ T_MOUSE = 0x05
 T_PING = 0x03
 T_PONG = 0x12
 T_BYE = 0x04
+# Host → client, immediately after HELLO_ACK: which player number this
+# connection was given (0-based). Sent only when the daemon serves more than
+# one slot. A client that predates it ignores the type and plays on regardless
+# — the number is a label, not a requirement.
+T_SLOT = 0x14
 
 R_VERSION_MISMATCH = 0x01
 R_IN_USE = 0x02
@@ -169,6 +176,13 @@ def encode_frame(msg_type: int, payload: bytes) -> bytes:
     if total > MAX_FRAME:
         raise ValueError(f"frame too large: {total} > {MAX_FRAME}")
     return struct.pack("<HB", total, msg_type) + payload
+
+
+def encode_slot(index: int) -> bytes:
+    """The player-number frame. Payload is one byte, 0-based."""
+    if not 0 <= index < slots.MAX_SLOTS:
+        raise ValueError(f"slot must be 0..{slots.MAX_SLOTS - 1}, got {index}")
+    return encode_frame(T_SLOT, bytes([index]))
 
 
 def encode_hello_ack(server_ver: int = PROTO_VER, accept: bool = True) -> bytes:
@@ -666,13 +680,59 @@ class SessionStats:
 # Single-active-client gate per spec §5.3. The TCP socket is accepted
 # unconditionally so a polite REJECT can be sent; only the post-HELLO
 # session is mutex-gated.
-_active_lock = threading.Lock()
-_active_peer: str | None = None
+class InjectorPool:
+    """Slots, and one injector per slot — built the first time it is claimed.
+
+    Not built up front. Pre-creating four ViGEm pads would put four XInput
+    controllers in front of every game the moment the helper starts, and a game
+    that assigns "Player 1" to the first pad it sees would hand it to an idle
+    one. Built on demand, the host shows exactly as many pads as there are
+    phones.
+
+    Once built, a pad is kept rather than unplugged on disconnect: a phone that
+    drops for a moment and comes back would otherwise make the controller
+    vanish and reappear mid-game.
+    """
+
+    def __init__(self, size: int, factory) -> None:
+        self._pool = slots.SlotPool(size)
+        self._factory = factory
+        self._injectors: list[Injector | None] = [None] * size
+        self._build_lock = threading.Lock()
+
+    @property
+    def size(self) -> int:
+        return self._pool.size
+
+    def acquire(self, key: str):
+        return self._pool.acquire(key)
+
+    def release(self, lease) -> None:
+        self._pool.release(lease)
+
+    def injector(self, index: int) -> Injector:
+        """The pad for this slot, built on first use. Serialised: two phones
+        connecting in the same millisecond must not race ViGEmBus."""
+        with self._build_lock:
+            existing = self._injectors[index]
+            if existing is not None:
+                return existing
+            built = self._factory()
+            self._injectors[index] = built
+            return built
+
+    def reset_all(self) -> None:
+        for injector in self._injectors:
+            if injector is None:
+                continue
+            try:
+                injector.reset()
+            except Exception:
+                pass
 
 
-def handle_client(client: socket.socket, addr, injector: Injector,
+def handle_client(client: socket.socket, addr, pool: "InjectorPool",
                   verbose: bool) -> None:
-    global _active_peer
 
     # Spec §1: TCP_NODELAY on both ends — the 4 ms / 8 ms report cadence
     # must not be coalesced by Nagle.
@@ -681,7 +741,11 @@ def handle_client(client: socket.socket, addr, injector: Injector,
 
     print(f"[{ts()}] ◇ connection from {addr[0]}:{addr[1]}")
     stats = SessionStats()
-    holding_lock = False
+    # Assigned inside the try, read in the finally: early returns (version
+    # mismatch, a full house) never reach the assignment, and an unbound name
+    # there would mask the real error.
+    lease = None
+    injector: Injector | None = None
 
     try:
         reader = frame_reader(client)
@@ -707,19 +771,27 @@ def handle_client(client: socket.socket, addr, injector: Injector,
             print(f"[{ts()}] ✗ version mismatch — rejected")
             return
 
-        # Acquire BEFORE ACKing so a 2nd phone gets a clear REJECT(in_use)
-        # instead of an ACK followed by a silent drop.
-        if not _active_lock.acquire(blocking=False):
+        # Claim a slot BEFORE ACKing, so a phone that cannot be served gets a
+        # clear REJECT(in_use) instead of an ACK followed by a silent drop.
+        lease = pool.acquire(f"{pad_name} @ {addr[0]}")
+        if lease is None:
+            busy = ", ".join(pool._pool.occupants().values())
             client.sendall(encode_reject(
-                R_IN_USE, f"daemon is already paired with {_active_peer}"))
-            print(f"[{ts()}] ✗ refused — already serving {_active_peer} "
-                  f"(in_use)")
+                R_IN_USE,
+                f"all {pool.size} player slot(s) in use: {busy}"))
+            print(f"[{ts()}] ✗ refused — {pool.size} slot(s) full (in_use)")
             return
-        holding_lock = True
-        _active_peer = f"{pad_name} @ {addr[0]}"
+        injector = pool.injector(lease.index)
 
-        client.sendall(encode_hello_ack(PROTO_VER, accept=True))
-        print(f"[{ts()}] ◂ HELLO_ACK accept=1 server_ver={PROTO_VER}")
+        # One write: the ACK and the player number reach the phone in the same
+        # segment, so a "Player 2" badge can be shown on the first frame rather
+        # than a beat later. A client that does not know the type drops it.
+        ack = encode_hello_ack(PROTO_VER, accept=True)
+        if pool.size > 1:
+            ack += encode_slot(lease.index)
+        client.sendall(ack)
+        print(f"[{ts()}] ◂ HELLO_ACK accept=1 server_ver={PROTO_VER}"
+              + (f" SLOT={lease.index + 1}/{pool.size}" if pool.size > 1 else ""))
         print(f"[{ts()}] ▶ injecting via {injector.name}")
 
         # Post-handshake: REPORTs while playing, PING every 2 s when idle.
@@ -775,13 +847,14 @@ def handle_client(client: socket.socket, addr, injector: Injector,
     finally:
         # Always neutralize: a phone that drops mid-press must not leave a
         # key held down or a trigger latched on the host.
-        try:
-            injector.reset()
-        except Exception:
-            pass
-        if holding_lock:
-            _active_peer = None
-            _active_lock.release()
+        # Order matters: neutralize first, release second. The other way round
+        # hands the slot to the next player with a button still held.
+        if lease is not None:
+            try:
+                pool.injector(lease.index).reset()
+            except Exception:
+                pass
+            pool.release(lease)
         print(f"[{ts()}] ◈ session: {stats.reports} reports, {stats.pings} "
               f"pings, {stats.dropped} dropped, {stats.bytes_in} bytes")
         try:
@@ -881,6 +954,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inject", default="auto",
                         choices=["auto", "vigem", "macos", "log"],
                         help="injection backend (default auto)")
+    parser.add_argument("--players", type=int, default=None,
+                        choices=range(1, slots.MAX_SLOTS + 1),
+                        metavar=f"1..{slots.MAX_SLOTS}",
+                        help="how many phones may play at once (default: "
+                             f"{slots.MAX_SLOTS} on Windows, 1 elsewhere)")
     parser.add_argument("--host-ip", default=None,
                         help="publish only this IPv4 address over Bonjour "
                              "(default: every non-loopback address, real "
@@ -893,6 +971,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     injector = build_injector(args.inject, args.verbose, args.mouse_speed)
+
+    # How many phones this host can actually serve.
+    #
+    # Windows: four, the ceiling XInput itself imposes (XUSER_MAX_COUNT). Four
+    # ViGEm pads is four controllers, which is what a game expects.
+    #
+    # Anywhere else: one. macOS and the log backend do not create controllers —
+    # they type on the keyboard and move the mouse — and four players sharing
+    # one keyboard is not a feature, it is four people fighting over WASD.
+    default_players = slots.MAX_SLOTS if isinstance(injector, VigemInjector) else 1
+    players = args.players or default_players
+    # Only the keyboard-and-mouse backend is genuinely unsplittable. The log
+    # backend is a diagnostic sink and honours whatever it is asked for, which
+    # is also how the multi-player path gets tested without four handsets.
+    if players > 1 and isinstance(injector, MacKbmInjector):
+        print(f"[{ts()}] ⚠ --players {players} ignored: {injector.name} types on "
+              f"one keyboard, which cannot be split between players")
+        players = 1
+
+    pool = InjectorPool(
+        players,
+        lambda: build_injector(args.inject, args.verbose, args.mouse_speed),
+    )
+    pool._injectors[0] = injector      # the one already built above
 
     hostname = short_hostname()
     service_name = sanitize_instance(args.name or f"V-Pad daemon — {hostname}")
@@ -952,7 +1054,11 @@ def main(argv: list[str] | None = None) -> int:
               f"RT=left-click LT=right-click")
         print(f"[{ts()}]      A=Space B=Ctrl X=E Y=R L1=Q R1=F L3=Shift "
               f"R3=C Select=Tab Start=Return")
-    print(f"[{ts()}] One phone at a time (spec §5.3). Ctrl+C to stop.")
+    if pool.size == 1:
+        print(f"[{ts()}] One phone at a time. Ctrl+C to stop.")
+    else:
+        print(f"[{ts()}] Up to {pool.size} phones at once — each gets its own "
+              f"controller. Ctrl+C to stop.")
     print()
 
     try:
@@ -962,7 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
             # immediately instead of queueing behind the live session.
             threading.Thread(
                 target=handle_client,
-                args=(client, addr, injector, args.verbose),
+                args=(client, addr, pool, args.verbose),
                 daemon=True,
             ).start()
     except KeyboardInterrupt:
