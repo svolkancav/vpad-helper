@@ -222,6 +222,77 @@ def set_autostart(enabled: bool) -> None:
         print("autostart toggle failed: %r" % (exc,))
 
 
+# ── Single instance ─────────────────────────────────────────────────
+
+# Whatever claims the instance has to stay referenced for the life of the
+# process. A garbage-collected mutex handle or a closed file releases the
+# claim, and the guard then silently stops guarding.
+_instance_claim: list = []
+
+_MUTEX_NAME = "Local\\VPadHelperSingleInstance"
+
+
+def claim_single_instance() -> bool:
+    """True if this is the only helper running, False if one already is.
+
+    Two copies are easy to end up with — "Start with Windows" is on and
+    the user also opens the shortcut — and the result is not two tray
+    icons doing the same harmless thing. Both engines start, both log
+    success, but only **one** is reachable: mDNS carries a single record
+    per instance name, so the phone talks to whichever registered first
+    while the other sits invisible holding a virtual gamepad. The tray
+    icon the user just clicked is then not the one the phone is talking
+    to, and quitting it changes nothing.
+
+    zeroconf's own conflict probe does not cover this. It looks the name
+    up in its cache, and a second process on the same host does not
+    reliably see the first one's multicast — measured: two daemons with
+    an identical --name both started, no exception, one record on the
+    wire.
+
+    When the answer cannot be determined this returns True. A guard that
+    refuses to start the app is worse than the duplicate it prevents.
+    """
+    if IS_WINDOWS:
+        try:
+            import ctypes  # noqa: PLC0415 — Windows-only
+            error_already_exists = 183
+            kernel32 = ctypes.windll.kernel32
+            # `Local\` scopes the name to the logon session, which is what
+            # we want: two users switched on one PC each get a helper.
+            handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+            if not handle:
+                return True
+            if kernel32.GetLastError() == error_already_exists:
+                return False
+            _instance_claim.append(handle)
+            return True
+        except Exception as exc:
+            print("single-instance check failed: %r" % (exc,))
+            return True
+
+    try:
+        import fcntl  # noqa: PLC0415 — POSIX only
+    except ImportError:
+        return True
+    folder = log_dir()
+    if not folder:
+        return True
+    try:
+        handle = open(os.path.join(folder, "instance.lock"), "a+")
+    except OSError:
+        return True
+    try:
+        # The lock is released by the OS when this process dies, however
+        # it dies — no stale lock file to clean up after a crash.
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _instance_claim.append(handle)
+    return True
+
+
 # ── ViGEmBus driver install ─────────────────────────────────────────
 
 def bundled_vigem_installer() -> str | None:
@@ -637,6 +708,12 @@ def main(argv: list[str] | None = None) -> int:
     sys.stderr = _Tee(sys.stderr, lines, log)
     print("── %s %s starting (pid %d) ──" % (APP_NAME, __version__, os.getpid()))
 
+    if not claim_single_instance():
+        print("another instance already holds the session — exiting")
+        tell("V-Pad Helper is already running.\n\nIts icon is in the system "
+             "tray — click the ^ arrow next to the clock if you can't see it.")
+        return 0
+
     def pump_logs() -> None:
         while True:
             state.absorb(lines.get())
@@ -653,14 +730,56 @@ def main(argv: list[str] | None = None) -> int:
     engine_thread.start()
 
     if tray_disabled:
-        engine_thread.join()
+        _wait_for_engine(engine_thread)
         return 0
 
     if run_tray(state, engine_thread) != 0:
         print("pystray not available — running in console mode. "
               "Ctrl+C to stop.")
-        engine_thread.join()
+        _wait_for_engine(engine_thread)
+        return 0
+
+    # The tray loop returned, which means the user chose Quit.
+    _stop_engine(engine_thread)
     return 0
+
+
+def _wait_for_engine(engine_thread: threading.Thread) -> None:
+    """Console mode: block until the engine ends or Ctrl+C arrives.
+
+    The signal is delivered to *this* thread, not the engine's, so the
+    engine's own KeyboardInterrupt handler never fires — it has to be
+    told to unwind.
+    """
+    try:
+        engine_thread.join()
+    except KeyboardInterrupt:
+        _stop_engine(engine_thread)
+
+
+def _stop_engine(engine_thread: threading.Thread) -> None:
+    """Unwind the engine so its Bonjour goodbye actually goes out.
+
+    The engine runs in a daemon thread, and the threading docs are blunt
+    about those: "Daemon threads are abruptly stopped at shutdown. Their
+    resources … may not be released properly." The mDNS unregister lives
+    in exactly such a `finally`, so simply returning from here used to
+    leave the service advertised. A phone that had already cached the
+    record then keeps listing this computer — RFC 6762 §10 recommends a
+    75-minute TTL for these records, where §10.1's goodbye packet would
+    have retired it in one second — and tapping it fails with no
+    explanation on either end.
+
+    Measured before the fix: a browsing client still listed the daemon
+    30 s after it died.
+    """
+    engine.request_shutdown()
+    engine_thread.join(timeout=5.0)
+    if engine_thread.is_alive():
+        # Not fatal: the process is about to exit anyway. Say so, because
+        # a silent 5-second pause on Quit would otherwise look like a bug.
+        print("engine did not stop within 5 s — exiting without a clean "
+              "Bonjour withdrawal")
 
 
 if __name__ == "__main__":
