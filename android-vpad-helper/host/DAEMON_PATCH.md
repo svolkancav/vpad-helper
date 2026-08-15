@@ -1,5 +1,16 @@
 # `vpad_daemon.py` yaması — QR eşleşmesini açmak
 
+> ⚠ **2026-08-14: bu belge artık ana yol değil.** Kendi host'umuz var:
+> `vpad_host.py`. Çoklu oyuncu ve QR eşleşmesi orada yamayla eklenen değil,
+> doğuştan var olan davranış — başka bir depoya yama göndermeden slot
+> mantığını değiştirebiliyoruz.
+>
+> Bu belge yalnızca `svolkancav/vpad-helper` içindeki daemon'ı da aynı
+> hizaya getirmek istenirse geçerli. Not: §7.2'deki "dört pad önden
+> yaratılıyor" yaklaşımı `vpad_host.py`'de bilinçli olarak terk edildi —
+> pad'ler ilk bağlantıda yaratılıyor, yoksa tek telefon bağlıyken bile
+> oyunlara dört kumanda görünüyor.
+
 Bu belge, mevcut `vpad_daemon.py`'ye uygulanacak **tam değişiklik listesidir**.
 Beş küçük düzenleme; hiçbiri mevcut akışı bozmuyor.
 

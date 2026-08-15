@@ -49,6 +49,12 @@ T_AUTH = 0x06       # istemci → host: 16 bayt nonce + 32 bayt mac
 # istemcisi uzunluğu doğruluyor. Yeni tip eklemek ise §9'a göre kırıcı değil.
 T_SLOT = 0x14
 
+# Oturum sürekliliği (2026-08-14). QR artık bir erişim anahtarı değil,
+# **tek kullanımlık kayıt bileti**; kaydolan cihaz kendi kimliğini alır ve
+# sonraki açılışlarda QR'sız girer. Ayrıntı ve gerekçe: vpad_devices.py.
+T_RESUME = 0x07      # istemci → host: kayıtlı cihaz kimliğiyle giriş
+T_CREDENTIAL = 0x15  # host → istemci: kayıt sonrası verilen cihaz kimliği
+
 # vpad_daemon.py'deki karşılıkları — bu modül daemon'ı içe aktarmadığı için
 # burada da tanımlı. Değerler DEĞİŞTİRİLEMEZ, iki dosya aynı teli konuşuyor.
 T_HELLO = 0x01
@@ -57,6 +63,11 @@ T_REJECT = 0x11
 
 R_AUTH_REQUIRED = 0x04  # REJECT sebebi: eşleşme açık, AUTH gelmedi
 R_AUTH_FAILED = 0x05    # REJECT sebebi: MAC uyuşmadı
+# REJECT sebebi: cihaz kimliği tanınmıyor (hiç kaydolmamış, süresi dolmuş
+# ya da iptal edilmiş). İstemci bunu görünce **QR ekranına düşmeli** —
+# R_AUTH_FAILED'dan ayrı olması tam bu yüzden: biri "yanlış anahtar",
+# diğeri "yeniden kaydol".
+R_DEVICE_UNKNOWN = 0x06
 
 MAX_FRAME = 4096  # vpad_daemon ile aynı
 

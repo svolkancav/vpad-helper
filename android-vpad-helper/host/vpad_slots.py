@@ -22,6 +22,7 @@ Beşinci istemci slot bulamaz ve `REJECT(in_use)` alır.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 # XInput'un tavanı. Bu bir tercih değil, platform sınırı.
@@ -56,7 +57,7 @@ class SlotPool:
             pool.release(lease)                # nötr rapor GÖNDERİLDİKTEN sonra
     """
 
-    __slots__ = ("_size", "_taken", "_sticky")
+    __slots__ = ("_size", "_taken", "_sticky", "_lock")
 
     def __init__(self, size: int = 1):
         if not 1 <= size <= MAX_SLOTS:
@@ -67,6 +68,12 @@ class SlotPool:
         # key → index. Kopan istemcinin eski slotu; yalnızca hatırlatma
         # amaçlı, rezervasyon DEĞİL (bkz. acquire).
         self._sticky: dict[str, int] = {}
+        # Havuz bağlantı başına bir thread'den çağrılıyor (`vpad_host`
+        # accept döngüsü). `acquire` bir slotu ÖNCE boş diye okuyup SONRA
+        # sahipleniyor; araya thread değişimi girerse iki telefon aynı
+        # slotu alır ve biri sessizce diğerinin pad'ine yazar. GIL bileşik
+        # işlemi korumaz — kilit şart.
+        self._lock = threading.Lock()
 
     @property
     def size(self) -> int:
@@ -74,11 +81,13 @@ class SlotPool:
 
     @property
     def free(self) -> int:
-        return self._size - len(self._taken)
+        with self._lock:
+            return self._size - len(self._taken)
 
     def occupants(self) -> dict[int, str]:
         """index → key kopyası. Tanı ve arayüz için."""
-        return dict(self._taken)
+        with self._lock:
+            return dict(self._taken)
 
     def acquire(self, key: str) -> SlotLease | None:
         """Slot verir; havuz doluysa None.
@@ -96,16 +105,18 @@ class SlotPool:
         if not key:
             raise SlotError("boş key ile slot alınamaz")
 
-        preferred = self._sticky.get(key)
-        if preferred is not None and preferred not in self._taken:
-            return self._claim(preferred, key)
+        with self._lock:
+            preferred = self._sticky.get(key)
+            if preferred is not None and preferred not in self._taken:
+                return self._claim(preferred, key)
 
-        for index in range(self._size):
-            if index not in self._taken:
-                return self._claim(index, key)
-        return None
+            for index in range(self._size):
+                if index not in self._taken:
+                    return self._claim(index, key)
+            return None
 
     def _claim(self, index: int, key: str) -> SlotLease:
+        """**`_lock` tutulurken çağrılır.** Yeniden girişli değil."""
         self._taken[index] = key
         self._sticky[key] = index
         return SlotLease(index=index, key=key)
@@ -119,7 +130,8 @@ class SlotPool:
         Başkasının slotunu bırakmak ise hatadır ve yoksayılır — o slot
         şu an başka bir istemciye ait.
         """
-        if self._taken.get(lease.index) == lease.key:
-            del self._taken[lease.index]
+        with self._lock:
+            if self._taken.get(lease.index) == lease.key:
+                del self._taken[lease.index]
         # `_sticky` KASITLI olarak silinmiyor: yapışkanlığın tüm amacı
         # istemci gittikten sonra da hatırlanmasıdır.

@@ -31,6 +31,7 @@ import socket
 import sys
 import time
 
+import vpad_devices as devices
 import vpad_pairing as pairing
 
 PROTO_VER = 1
@@ -50,10 +51,13 @@ HAT_CENTER = 8
 
 REJECT_REASONS = {
     0x01: "sürüm uyuşmazlığı",
-    0x02: "daemon başka bir telefonla meşgul",
+    # Çoklu oyuncuyla birlikte anlamı değişti: "başka bir telefonla meşgul"
+    # değil, "boş oyuncu slotu yok". Tek oyunculu host'ta ikisi aynı şey.
+    0x02: "host'ta boş oyuncu slotu yok",
     0x03: "desteklenmeyen skin",
     pairing.R_AUTH_REQUIRED: "eşleşme gerekli — QR taranmadı",
     pairing.R_AUTH_FAILED: "eşleşme doğrulaması başarısız — yanlış token",
+    pairing.R_DEVICE_UNKNOWN: "cihaz kaydı yok veya süresi doldu — QR'ı tara",
     0xFF: "iç hata",
 }
 
@@ -163,17 +167,39 @@ def encode_report(buttons: int = 0, hat: int = HAT_CENTER,
 class VPadClient:
     """Eşleşen ve rapor gönderen istemci."""
 
-    def __init__(self, info: pairing.PairingInfo, name: str = "Referans Istemci"):
+    def __init__(self, info: pairing.PairingInfo, name: str = "Referans Istemci",
+                 credential: tuple[str, bytes] | None = None):
         self.info = info
         self.name = name
+        # Saklı cihaz kimliği (device_id, key). Varsa QR yerine BU kullanılır
+        # ve host'a RESUME gönderilir — "oturum sürekliliği" tam olarak bu.
+        # Kotlin karşılığında Keystore'dan okunacak olan şey.
+        self.credential = credential
         self._sock: socket.socket | None = None
         self._reader: FrameReader | None = None
         self.paired = False
+        # Kayıt sonrası host'un verdiği kimlik; istemci bunu SAKLAMALI.
+        self.issued_credential: tuple[str, bytes] | None = None
         # Host'un atadığı oyuncu indeksi (0..3); None = tek oyunculu host.
         self.slot: int | None = None
 
     def connect(self, timeout: float = 10.0, pair_wait: float = 2.0) -> None:
         """Bağlan, gerekiyorsa eşleş, HELLO_ACK'e kadar git.
+
+        **Başarısızlıkta soketi kapatır.** `connect` yükseldiğinde çağıranın
+        elinde kapatacak bir nesne olmuyordu ve reddedilen her deneme bir
+        dosya tanıtıcısı sızdırıyordu. Reddedilme bu protokolde olağan bir
+        yol (yanlış QR, bilinmeyen cihaz, dolu slot), istisna değil —
+        Kotlin karşılığında da aynı temizlik gerekiyor.
+        """
+        try:
+            self._handshake(timeout, pair_wait)
+        except BaseException:
+            self.close()
+            raise
+
+    def _handshake(self, timeout: float, pair_wait: float) -> None:
+        """El sıkışmanın kendisi.
 
         **Sıralama neden böyle.** Eşleşme açıkken host, bağlantıyı kabul
         eder etmez CHALLENGE gönderir ve istemcinin ilk çerçevesinin AUTH
@@ -213,7 +239,12 @@ class VPadClient:
                     raise ProtocolError(
                         f"challenge {pairing.CHALLENGE_LEN} bayt olmalı, "
                         f"{len(payload)} geldi")
-                sock.sendall(pairing.encode_auth(self.info.token, payload))
+                if self.credential is not None:
+                    # Kayıtlı cihaz: QR'a hiç bakmıyoruz.
+                    device_id, key = self.credential
+                    sock.sendall(devices.encode_resume(device_id, key, payload))
+                else:
+                    sock.sendall(pairing.encode_auth(self.info.token, payload))
                 self.paired = True
                 # Token yanlışsa host REJECT gönderip soketi KAPATIR. Bu
                 # noktada HELLO göndermek, kapanmakta olan sokete yazmak
@@ -296,8 +327,7 @@ class VPadClient:
             msg_type, payload = frame
             if msg_type == pairing.T_REJECT:
                 return payload
-            if msg_type == pairing.T_SLOT and payload:
-                self.slot = payload[0]
+            self._consume_side_channel(msg_type, payload)
 
     def _read_until(self, wanted: int) -> tuple[int, bytes]:
         """`wanted` (ya da REJECT) gelene kadar okur.
@@ -313,8 +343,24 @@ class VPadClient:
             msg_type, payload = self._reader.next_frame()  # type: ignore[union-attr]
             if msg_type in (wanted, pairing.T_REJECT):
                 return msg_type, payload
-            if msg_type == pairing.T_SLOT and payload:
-                self.slot = payload[0]
+            self._consume_side_channel(msg_type, payload)
+
+    def _consume_side_channel(self, msg_type: int, payload: bytes) -> None:
+        """Yan kanal çerçevesi: tanıyorsak işleriz, tanımıyorsak atarız.
+
+        Kotlin karşılığı: `WifiGamepadClient.consumeSideChannel`. Yayındaki
+        2.0.0 istemcisi `T_CREDENTIAL`'ı tanımıyor ve **sessizce atıyor** —
+        bu yüzden yeni çerçeveyi eklemek eski uygulamayı kırmıyor; yalnızca
+        süreklilik kazanamıyor, her açılışta QR tarıyor.
+        """
+        if msg_type == pairing.T_SLOT and payload:
+            self.slot = payload[0]
+        elif msg_type == pairing.T_CREDENTIAL:
+            try:
+                self.issued_credential = devices.parse_credential(payload)
+            except devices.DeviceError:
+                # Bozuk kimlik = süreklilik yok, ama oturum sürebilir.
+                self.issued_credential = None
 
     def _raise_reject(self, payload: bytes) -> None:
         reason = payload[0] if payload else 0xFF

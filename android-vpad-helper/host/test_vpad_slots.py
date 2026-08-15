@@ -147,5 +147,81 @@ class SlotFrameTests(unittest.TestCase):
                 p.encode_slot(bad)
 
 
+class ConcurrencyTests(unittest.TestCase):
+    """Havuz bağlantı başına bir thread'den çağrılıyor.
+
+    `acquire` bir slotu ÖNCE boş diye okuyup SONRA sahipleniyor. Bu iki
+    adımın arasına thread değişimi girerse iki telefon aynı slotu alır ve
+    biri sessizce diğerinin sanal pad'ine yazar — üstelik başka bir slot
+    boş dururken. GIL bileşik işlemi korumaz.
+    """
+
+    # Yarışın penceresi birkaç bytecode genişliğinde; varsayılan 5 ms'lik
+    # thread değişim aralığıyla neredeyse hiç yakalanmaz. Aralığı kısmak
+    # testin dişini takıyor: kilit kaldırıldığında 40 turun ~10'u
+    # ihlal veriyor (ölçüldü: kilitsiz 4000 turda 951 ihlal, kilitli 0).
+    ROUNDS = 40
+    RACERS = 16
+
+    def setUp(self) -> None:
+        self._switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+
+    def tearDown(self) -> None:
+        sys.setswitchinterval(self._switch_interval)
+
+    def test_concurrent_acquire_never_double_allocates(self):
+        import threading
+
+        for round_no in range(self.ROUNDS):
+            pool = s.SlotPool(s.MAX_SLOTS)
+            start = threading.Barrier(self.RACERS)
+            leases: list[s.SlotLease] = []
+            guard = threading.Lock()
+
+            def racer(n: int) -> None:
+                start.wait()                   # hepsi aynı anda dalsın
+                lease = pool.acquire(f"telefon-{n}")
+                if lease is not None:
+                    with guard:
+                        leases.append(lease)
+
+            threads = [threading.Thread(target=racer, args=(n,))
+                       for n in range(self.RACERS)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+            indexes = sorted(lease.index for lease in leases)
+            # Tavan kadar lease verilmeli, fazlası None almalı; ve hiçbir
+            # indeks iki kez dağıtılmamalı.
+            self.assertEqual(list(range(s.MAX_SLOTS)), indexes,
+                             f"tur {round_no}: slot iki kez dağıtıldı")
+            self.assertEqual(0, pool.free)
+
+    def test_concurrent_release_returns_every_slot(self):
+        import threading
+
+        pool = s.SlotPool(s.MAX_SLOTS)
+        leases = [pool.acquire(f"telefon-{n}") for n in range(s.MAX_SLOTS)]
+        start = threading.Barrier(s.MAX_SLOTS)
+
+        def releaser(lease: s.SlotLease) -> None:
+            start.wait()
+            pool.release(lease)
+            pool.release(lease)                # çift bırakma zararsız olmalı
+
+        threads = [threading.Thread(target=releaser, args=(lease,))
+                   for lease in leases]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(s.MAX_SLOTS, pool.free)
+        self.assertEqual({}, pool.occupants())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
