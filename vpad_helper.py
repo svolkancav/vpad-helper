@@ -44,6 +44,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vpad_daemon as engine  # noqa: E402 — path must be set first
 
 APP_NAME = "V-Pad Helper"
+
+# Single source of truth for the version. `vpad-helper.spec` parses it into
+# the .exe's Windows version resource, CI passes it to `installer.iss` for
+# the Add/Remove Programs entry, and the tray menu shows it.
+#
+# On a `v*` tag build CI asserts that this equals the tag and fails the
+# build otherwise — bumping the tag alone would ship an .exe whose
+# properties still claimed the previous release.
+__version__ = "0.2.2"
+
+PUBLISHER = "V-Pad"
+HOMEPAGE = "https://vpadcontroller.com/"
 VIGEM_DOWNLOAD_URL = "https://github.com/nefarius/ViGEmBus/releases/latest"
 
 IS_WINDOWS = sys.platform == "win32"
@@ -553,7 +565,12 @@ def run_tray(state: HelperState, pump: threading.Thread) -> int:
                 "Start with Windows",
                 lambda _i, _t: set_autostart(not autostart_enabled()),
                 checked=lambda _i: autostart_enabled()))
+        # Version in the menu, not only in the log: the first question on
+        # any bug report is which build the person is running, and the log
+        # folder is two clicks further away than this line.
         items += [pystray.Menu.SEPARATOR,
+                  pystray.MenuItem("Version %s" % __version__, None,
+                                   enabled=False),
                   pystray.MenuItem("Quit", on_quit)]
         return pystray.Menu(*items)
 
@@ -618,7 +635,7 @@ def main(argv: list[str] | None = None) -> int:
     log = _open_log()
     sys.stdout = _Tee(sys.stdout, lines, log)
     sys.stderr = _Tee(sys.stderr, lines, log)
-    print("── %s starting (pid %d) ──" % (APP_NAME, os.getpid()))
+    print("── %s %s starting (pid %d) ──" % (APP_NAME, __version__, os.getpid()))
 
     def pump_logs() -> None:
         while True:

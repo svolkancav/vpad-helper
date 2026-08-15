@@ -96,35 +96,119 @@ jobs:
         # onefile yerine onedir + zip.
         run: pip install --no-binary pyinstaller pyinstaller
 
+      - name: Resolve the version
+        # vpad_helper.py's __version__ is the single source of truth. On a
+        # tag build the tag must agree with it: bumping only the tag used
+        # to ship an installer whose Add/Remove Programs entry, filename
+        # and version resource all still claimed the previous release.
+        id: ver
+        shell: pwsh
+        run: |
+          $m = Select-String -Path vpad_helper.py -Pattern '^__version__\s*=\s*"([^"]+)"'
+          if (-not $m) { throw "no __version__ in vpad_helper.py" }
+          $v = $m.Matches[0].Groups[1].Value
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}" -replace '^v', ''
+            if ($tag -ne $v) {
+              throw "tag ${{ github.ref_name }} does not match __version__ $v — bump vpad_helper.py"
+            }
+          }
+          "version=$v" | Out-File -Append $env:GITHUB_OUTPUT
+          "building $v"
+
       - name: Build one-file exe
         run: pyinstaller --noconfirm vpad-helper.spec
 
-      - name: Sanity-check the artifact exists
+      - name: Build one-dir bundle (payload for the installer)
+        # Separate workpath: the two layouts share a spec but not a build
+        # tree, and reusing it makes the second run trip over the first
+        # run's TOCs.
+        env:
+          VPAD_ONEDIR: "1"
+        run: pyinstaller --noconfirm --distpath dist-onedir --workpath build-onedir vpad-helper.spec
+
+      - name: Sign the executables
+        # Before packaging, not after: the installer carries these files,
+        # so signing them afterwards would sign nothing that ships. No-op
+        # without the certificate secrets — forks and PRs still build.
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: ./sign-windows.ps1 "dist/V-Pad Helper.exe" "dist-onedir/V-Pad Helper/V-Pad Helper.exe"
+
+      - name: Build the installer
+        # Inno Setup 6 is preinstalled on the windows runner images; the
+        # path is searched rather than hard-coded because the image has
+        # moved it before.
         shell: pwsh
         run: |
-          $exe = "dist/V-Pad Helper.exe"
-          if (-not (Test-Path $exe)) { throw "build produced no exe" }
-          "size: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB)
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found on this runner" }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
+
+      - name: Sign the installer
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: ./sign-windows.ps1 "dist-installer/V-Pad-Helper-Setup.exe"
+
+      - name: Sanity-check the artifacts
+        shell: pwsh
+        run: |
+          $want = @(
+            "dist/V-Pad Helper.exe",
+            "dist-installer/V-Pad-Helper-Setup.exe"
+          )
+          foreach ($f in $want) {
+            if (-not (Test-Path $f)) { throw "build produced no $f" }
+            $i = Get-Item $f
+            "{0,-46} {1,7:N1} MB  v{2}" -f $i.Name, ($i.Length / 1MB), $i.VersionInfo.FileVersion
+          }
+          # A blank version resource is the failure this guards: the build
+          # still succeeds, and the shipped file looks unattributed.
+          $exe = Get-Item "dist/V-Pad Helper.exe"
+          if (-not $exe.VersionInfo.ProductName) { throw "exe has no version resource" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: vpad-helper-windows
-          path: dist/V-Pad Helper.exe
+          path: |
+            dist/V-Pad Helper.exe
+            dist-installer/V-Pad-Helper-Setup.exe
           if-no-files-found: error
 
       - name: Publish release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/V-Pad Helper.exe
+          # Installer first — it is the recommended download. The bare .exe
+          # stays published because older releases, the README and the
+          # website have linked straight at it, and a 404 is worse than a
+          # second option.
+          files: |
+            dist-installer/V-Pad-Helper-Setup.exe
+            dist/V-Pad Helper.exe
           body: |
             **V-Pad Helper for Windows** — the companion app for V-Pad on iPhone.
 
-            1. Download `V-Pad Helper.exe` and run it. It lives in the system tray.
+            1. Download **`V-Pad-Helper-Setup.exe`** and run it.
+               It installs for your user only, so it does not ask for administrator
+               rights, and it puts an uninstaller in Add/Remove Programs. The app
+               itself lives in the system tray.
             2. If the tray offers "Install gamepad driver", accept it once (ViGEmBus —
-               this is what lets games see a real Xbox controller).
+               this is what lets games see a real Xbox controller). That step *does*
+               need administrator rights, because it installs a driver.
             3. On the iPhone: open V-Pad → Connection → tap this computer.
 
             Keep the phone and the PC on the same Wi-Fi network. Windows will ask
             once whether the app may use the network — allow it on **private**
             networks, otherwise the phone can see the computer but not connect.
+
+            `V-Pad Helper.exe` is the same app without an installer, for anyone who
+            prefers a single file to copy around.
