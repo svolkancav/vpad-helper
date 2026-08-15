@@ -75,12 +75,21 @@ UninstallDisplayName={#AppName}
 
 ; Restart Manager is deliberately OFF; [Code] closes the app instead.
 ;
-; Measured, not assumed: with CloseApplications=yes, upgrading over a
-; running helper fails with exit code 5. Restart Manager can only shut
-; down a process that answers its request, and this one is a pystray tray
-; app whose window never does — so Setup falls back to asking, and under
-; /VERYSILENT that question is answered "cancel". Every user updating the
-; helper would have hit it.
+; Measured, not assumed. With CloseApplications=yes, upgrading over a
+; running helper fails with exit code 5. The chain is documented on both
+; ends: Restart Manager can only shut down a process that answers its
+; request, and this one is a pystray tray app whose window never does; the
+; file stays locked, Setup raises an Abort/Retry box, and /SUPPRESSMSGBOXES
+; answers those with "Abort" — which is exactly what exit code 5 means
+; ("user clicked Cancel during the actual installation"). Every user
+; updating the helper would have hit it, and silently.
+;
+; CloseApplications=force was tried as the simpler fix and is NOT enough.
+; It does repair the install path (exit 0), but the uninstaller does not
+; honour it: uninstalling a running helper returned exit 0 while leaving
+; the app running and 56 files behind. A cleanup that reports success and
+; half-removes itself is worse than one that fails loudly. One mechanism
+; that covers both paths beats two that disagree.
 CloseApplications=no
 
 LicenseFile=LICENSE
