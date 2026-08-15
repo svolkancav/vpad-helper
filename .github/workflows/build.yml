@@ -69,7 +69,32 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt
+
+      - name: Install PyInstaller with a locally compiled bootloader
+        # `--no-binary` KASITLI ve bu satırın tek sebebi antivirüs.
+        #
+        # Hazır wheel, önceden derlenmiş bir bootloader taşıyor. O ikili,
+        # PyInstaller kullanan BİNLERCE gerçek zararlıyla bayt bayt ortak —
+        # ve ML tabanlı motorlar tam olarak ona kilitleniyor. Sonuç, yayındaki
+        # 0.2.1 exe'sinde ölçüldü (2026-08-15):
+        #
+        #     Microsoft Defender  Trojan:Win32/Wacatac.C!ml  (severity 5)
+        #     + Elastic, SentinelOne, Bkav, SecureAge, Arctic Wolf
+        #
+        # Hepsi sezgisel/ML; imza tabanlı hiçbir motor işaretlemedi. Defender
+        # dosyayı indirir indirmez SİLİYOR, yani kullanıcı "Yine de çalıştır"
+        # ekranına bile ulaşamıyor — kurulum tamamen imkânsız.
+        #
+        # Kaynaktan kurmak bootloader'ı bu runner'da MSVC ile derliyor;
+        # baytlar değişince eşleşme kırılıyor. `windows-latest` üzerinde
+        # derleyici hazır, ek kurulum gerekmiyor.
+        #
+        # Bu TEK BAŞINA yetmeyebilir: onefile + `console=False` da sezgisel
+        # puanı yükseltiyor. Sıradaki kaldıraçlar, sırayla: Microsoft'a
+        # yanlış-pozitif bildirimi (en hızlısı), kod imzalama, ve gerekirse
+        # onefile yerine onedir + zip.
+        run: pip install --no-binary pyinstaller pyinstaller
 
       - name: Build one-file exe
         run: pyinstaller --noconfirm vpad-helper.spec

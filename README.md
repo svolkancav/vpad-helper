@@ -37,8 +37,25 @@ this category ships a desktop component.
    start out hidden, so click the **^** arrow to find it (Settings → Personalization →
    Taskbar → *Other system tray icons* keeps it visible). A notification on first run
    tells you it is up.
-2. **Windows will warn you** ("Windows protected your PC") because the file is not
-   code-signed yet: *More info → Run anyway*.
+2. **Windows Defender may delete the download.** The file is not code-signed yet, and
+   Defender's machine-learning scanner currently flags it as
+   `Trojan:Win32/Wacatac.C!ml` — a **false positive** that PyInstaller-packaged Python
+   apps are well known for. It is not a "Run anyway" prompt: the file is removed before
+   you can open it.
+
+   Every engine that flags it is heuristic; no signature-based scanner does. The whole
+   thing is open source — [read it](https://github.com/svolkancav/vpad-helper) and
+   [run it from source](#running-from-source) if you would rather not take our word
+   for it.
+
+   To install it anyway, restore the file from Defender: **Windows Security → Virus &
+   threat protection → Protection history →** find the V-Pad Helper entry **→ Actions →
+   Allow on device**, then download again. On other antivirus products the equivalent is
+   "restore from quarantine" plus an exclusion.
+
+   We are fixing this at the source, not asking users to live with it: a false-positive
+   report is filed with Microsoft, the build now compiles its own PyInstaller bootloader
+   (the shared binary is what the scanners match on), and code signing is next.
 3. Windows then asks whether the app may use the network. **Allow it on private
    networks** — without that the phone can see your computer but cannot connect.
 4. **On first run it offers the gamepad driver** and asks for permission. Accept it.
