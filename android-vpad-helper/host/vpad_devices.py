@@ -520,9 +520,13 @@ class AccessGate:
     def _enroll(self, payload: bytes) -> Outcome:
         ticket = self._ticket
         if ticket is None:
+            # `vpad_host` her kayıttan sonra hemen yeni bilet açtığı için
+            # buraya normalde düşülmez; düşülürse mesaj GERÇEKTEN yapılabilir
+            # olanı söylemeli. (Eskiden "host'ta yeni QR üretin" diyordu ama
+            # üretmenin yolu yoktu — kullanıcıyı çıkmaza sokuyordu.)
             return Outcome(ok=False, reject=pairing.encode_reject(
                 pairing.R_AUTH_REQUIRED,
-                "şu an açık bir kayıt bileti yok; host'ta yeni QR üretin"))
+                "host şu an kayıt kabul etmiyor; bilgisayarda yeni QR isteyin"))
         if ticket.spent:
             # Tek kullanımlık biletin tüm anlamı burada. Fotoğraflanmış
             # QR ikinci cihazı kaydettiremiyor.

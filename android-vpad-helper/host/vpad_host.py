@@ -627,24 +627,28 @@ class SessionStats:
 class TicketDesk:
     """Tek kullanımlık kayıt biletlerini yönetir ve QR'ı ekrana basar.
 
-    Bilet **tek cihaz** kaydeder (user kararı 2026-08-14). Dört oyunculu
-    kurulumda dört ayrı QR turu gerekmesin diye, bir bilet harcandığında
-    sıradakini kendiliğinden üretiyoruz — ama **`--players` kadarıyla
-    sınırlı.** O sınıra varınca ekranda açık bilet kalmıyor: yeni cihaz
-    kaydetmek için daemon yeniden başlatılmalı.
+    Bilet **tek cihaz** kaydeder (user kararı 2026-08-14): ekranda unutulmuş
+    ya da fotoğraflanmış bir kare ikinci cihazı içeri alamaz. Bir bilet
+    harcandığında masa **hemen yenisini açar** — güvence "bir QR = bir
+    cihaz", "toplamda N cihaz" değil.
 
-    Bu, "oturum boyunca geçerli tek QR"dan farklı: her QR yalnız bir
-    cihaz kaydediyor, yani ekranda unutulmuş ya da fotoğraflanmış bir kare
-    ikinci cihazı içeri alamıyor.
+    ⚠️ **Bütçe kaldırıldı (2026-08-15).** Önce auto-mint `--players` ile
+    sınırlıydı; o sınıra varınca açık bilet kalmıyordu. Sahada kilitledi:
+    istemci `RESUME` bilmediği için her yeniden bağlanışta YENİDEN
+    kaydoluyor ve bir bilet daha yakıyor, yani `--players 2` iki
+    bağlantıdan sonra kapıyı kapatıyordu. Üstelik ret mesajı "host'ta yeni
+    QR üretin" diyordu ama üretmenin bir yolu yoktu — kullanıcıyı olmayan
+    bir düğmeye yönlendiren çıkmaz. Sayaç yalnızca günlük için duruyor.
 
     Kayıtlı cihazlar bundan etkilenmez — onlar bilet değil `RESUME`
-    kullanıyor, açık bilet olmasa da girerler.
+    kullanıyor.
     """
 
-    def __init__(self, address: str, port: int, max_enrollments: int):
+    def __init__(self, address: str, port: int, max_enrollments: int = 0):
         self._address = address
         self._port = port
-        self._max = max(1, max_enrollments)
+        # Yalnızca bilgilendirme amaçlı; kapıyı kapatmıyor (bkz. sınıf notu).
+        self._players = max(1, max_enrollments)
         self._enrolled = 0
         self._ticket: devices.Ticket | None = devices.Ticket()
         self._lock = threading.Lock()
@@ -654,11 +658,10 @@ class TicketDesk:
             return self._ticket
 
     def announce(self) -> None:
-        """Açık biletin QR'ını basar. Bilet yoksa sebebini yazar."""
+        """Açık biletin QR'ını basar."""
         ticket = self.current()
-        if ticket is None:
-            log(f"Kayıt kapalı — bu çalıştırmada {self._max} cihaz kaydedildi.")
-            log("Yeni cihaz eklemek için daemon'ı yeniden başlatın.")
+        if ticket is None:                      # savunma; normalde olmaz
+            log("Açık kayıt bileti yok — yeni QR için Enter'a basın.")
             return
         payload = pairing.build_payload(self._address, self._port, ticket.token)
         log_raw()
@@ -667,14 +670,25 @@ class TicketDesk:
         log_raw(pairing.render_qr_terminal(payload))
         log(f"Eşleştirme    : {payload}")
 
+    def mint(self) -> None:
+        """Elle yeni bilet: eskisi ölür, yenisi basılır.
+
+        Kullanıcının "yeni QR üret" isteğinin gerçek karşılığı. Kaybolan
+        telefonu iptal ettikten sonra ya da ekranı başkası gördüğünde
+        biletin tazelenmesi için.
+        """
+        with self._lock:
+            self._ticket = devices.Ticket()
+        log("◈ yeni kayıt bileti üretildi — önceki QR öldü")
+        self.announce()
+
     def note_enrollment(self) -> None:
-        """Bir cihaz kaydoldu: bileti kapat, sıra varsa yenisini aç."""
+        """Bir cihaz kaydoldu: bileti kapat, hemen yenisini aç."""
         with self._lock:
             self._enrolled += 1
-            self._ticket = (devices.Ticket() if self._enrolled < self._max
-                            else None)
-            remaining = self._max - self._enrolled
-        log(f"◈ kayıt tamamlandı — bu QR öldü, {remaining} kayıt hakkı kaldı")
+            self._ticket = devices.Ticket()
+            count = self._enrolled
+        log(f"◈ kayıt tamamlandı ({count}. cihaz) — bu QR öldü, yenisi altta")
         self.announce()
 
 
@@ -1103,6 +1117,20 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log(f"Aynı anda {args.players} telefon. Sanal pad'ler ilk "
             f"bağlantıda yaratılır.")
+    # "Yeni QR üret" isteğinin gerçek karşılığı. Ret mesajı kullanıcıyı
+    # buraya yönlendiriyor; yönlendirdiği şeyin var olması gerekiyor.
+    #
+    # `isatty` kontrolü şart: tepsi uygulamasından ya da servis olarak
+    # çalıştırıldığında stdin bir konsol değil ve `for ... in sys.stdin`
+    # anında EOF alıp thread'i bitirir — zararsız ama satırı da basmayalım.
+    if desk is not None and sys.stdin is not None and sys.stdin.isatty():
+        def _ticket_console() -> None:
+            for _ in sys.stdin:          # her Enter → yeni bilet
+                desk.mint()
+
+        threading.Thread(target=_ticket_console, daemon=True).start()
+        log("Yeni QR için Enter'a basın (eskisi ölür).")
+
     log("Durdurmak için Ctrl+C.")
     log_raw()
 

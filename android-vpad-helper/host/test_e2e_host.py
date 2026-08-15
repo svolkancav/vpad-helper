@@ -387,23 +387,56 @@ class EnrollmentTest(unittest.TestCase):
             self.addCleanup(b.close)
             self.assertEqual(2, len(host.store.devices()))
 
-    def test_desk_closes_after_players_enrollments(self):
+    def test_desk_always_opens_a_fresh_ticket_and_the_old_one_dies(self):
+        """Kayıttan sonra masa KAPANMAZ, yenisini açar — ama eskisi ölür.
+
+        Bütçe 2026-08-15'te kaldırıldı: `--players` kadar kayıttan sonra
+        masayı kapatmak sahada kilitledi. İstemci `RESUME` bilmediği için
+        her yeniden bağlanışta yeniden kaydoluyor ve bir bilet daha yakıyor;
+        `--players 2` iki bağlantıdan sonra kapıyı kapatıyordu. Üstelik ret
+        mesajı "yeni QR üretin" diyordu ama üretmenin yolu yoktu.
+
+        Güvence "toplamda N cihaz" değil, **bir QR = bir cihaz**. Bu test
+        tam olarak onu çiviliyor.
+        """
         with Host(players=1, pair=True, store=temp_store(self)) as host:
             stolen = host.ticket_token()
             a = connect(host, "Telefon A", pair_wait=2.0)
             self.addCleanup(a.close)
-            self.assertIsNone(host.desk.current(),
-                              "tek oyunculu host'ta ikinci bilet açılmamalı")
 
-            # Açık bilet kalmadığında kayıt kapısı tamamen kapalı:
-            # eski QR da yenisi de içeri alamaz.
+            fresh = host.desk.current()
+            self.assertIsNotNone(fresh, "kayıttan sonra yeni bilet açılmalı")
+            self.assertNotEqual(stolen, fresh.token,
+                                "yeni bilet eskisiyle aynı token olamaz")
+
+            # Eski QR (fotoğrafı çekilmiş olabilir) artık ölü.
             a.close()
             self.assertTrue(wait_until(lambda: host.pool.free == 1))
             with self.assertRaises(Rejected) as caught:
                 connect(host, "Telefon B", token=stolen, pair_wait=2.0)
-            self.assertEqual(pairing.R_AUTH_REQUIRED,
-                             caught.exception.reason)
+            self.assertEqual(pairing.R_AUTH_FAILED, caught.exception.reason)
             self.assertEqual(1, len(host.store.devices()))
+
+            # Ama YENİ bilet çalışıyor — kapı kapanmadı.
+            with connect(host, "Telefon B", token=fresh.token,
+                         pair_wait=2.0) as b:
+                self.assertIsNotNone(b.issued_credential)
+            self.assertEqual(2, len(host.store.devices()))
+
+    def test_manual_mint_kills_the_previous_ticket(self):
+        """Elle "yeni QR" — ret mesajının yönlendirdiği şeyin karşılığı."""
+        with Host(players=1, pair=True, store=temp_store(self)) as host:
+            old = host.ticket_token()
+            host.desk.mint()
+            new = host.ticket_token()
+            self.assertNotEqual(old, new)
+
+            with self.assertRaises(Rejected) as caught:
+                connect(host, "Eski QR", token=old, pair_wait=2.0)
+            self.assertEqual(pairing.R_AUTH_FAILED, caught.exception.reason)
+
+            with connect(host, "Yeni QR", token=new, pair_wait=2.0) as c:
+                self.assertIsNotNone(c.issued_credential)
 
     def test_concurrent_scans_enroll_only_one_device(self):
         """İki telefon aynı QR'ı aynı anda okutursa yalnız biri kaydolur."""
@@ -500,13 +533,17 @@ class SessionContinuityTest(unittest.TestCase):
             first.close()
             self.assertTrue(wait_until(lambda: host.pool.free == 1))
 
-            # Bilet bitti (tek oyuncu), ama kayıtlı cihaz yine de girer.
-            self.assertIsNone(host.desk.current())
+            # Kayıtlı cihaz bileti HİÇ kullanmıyor: masada açık bilet
+            # dursa da o RESUME yolundan giriyor ve bileti harcamıyor.
+            before = host.ticket_token()
             with connect(host, "Telefon A", pair_wait=2.0,
                          credential=credential) as again:
                 self.assertIsNone(again.slot)  # tek oyuncuda SLOT gönderilmiyor (spec §4.9)
                 # RESUME yolunda yeni kimlik verilmiyor.
                 self.assertIsNone(again.issued_credential)
+            # Bilet dokunulmadan duruyor — kayıtlı cihaz onu yakmadı.
+            self.assertEqual(before, host.ticket_token())
+            self.assertEqual(1, len(store.devices()))
 
     def test_credential_survives_a_daemon_restart(self):
         """Asıl istenen: PC kapanıp açılınca telefon QR taramasın."""
