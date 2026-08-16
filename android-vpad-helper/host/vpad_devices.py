@@ -173,13 +173,25 @@ class Ticket:
     Ekranda unutulan ya da fotoğraflanan QR'ın penceresi böyle kapanıyor.
     """
 
-    __slots__ = ("token", "_spent", "_lock")
+    # Kod kaç yanlış denemeden sonra kilitlenir. 6 hane = 10^6, ve saldırgan
+    # host'a bağlanmadan deneyemiyor; asıl kilit bu sayaç. Beş, kullanıcının
+    # ekrandan yanlış okuyup düzeltmesine yer bırakıyor, saldırgana bilet
+    # başına milyonda beş şans veriyor.
+    MAX_CODE_ATTEMPTS = 5
 
-    def __init__(self, token: bytes | None = None):
+    __slots__ = ("token", "code", "_spent", "_failures", "_code_locked",
+                 "_lock")
+
+    def __init__(self, token: bytes | None = None, code: str | None = None):
         import threading
 
         self.token = token if token is not None else pairing.generate_token()
+        # Kamerası olmayan cihazın tek girişi. QR ile aynı bilete bağlı:
+        # biri harcanınca ikisi de ölüyor.
+        self.code = code if code is not None else pairing.generate_code()
         self._spent = False
+        self._failures = 0
+        self._code_locked = False
         # "Harcanmış mı" bakıp sonra harcamak bileşik bir işlem. İki telefon
         # aynı QR'ı aynı anda okutursa —dört oyunculu kurulumda gayet olası—
         # ikisi de kontrolü geçip ikisi de kaydolurdu; tek kullanımlık
@@ -198,6 +210,31 @@ class Ticket:
                 return False
             self._spent = True
             return True
+
+    @property
+    def code_locked(self) -> bool:
+        with self._lock:
+            return self._code_locked
+
+    def note_code_failure(self) -> bool:
+        """Yanlış denemeyi sayar. Kod bu denemeyle kilitlendiyse True döner.
+
+        **Kilit yalnızca KODU kapatıyor, bileti değil.** İlk tasarım bileti
+        yakıyordu ve `test_e2e_host.test_failed_pairing_does_not_consume_a_slot`
+        bunu yakaladı: LAN'daki biri beş yanlış deneme yapıp meşru telefonun
+        QR'ını da öldürebiliyordu. Yani kaba kuvvete karşı koyarken elimizle
+        bir hizmet dışı bırakma açmışız.
+
+        Şimdi QR token'ı denemelerden etkilenmiyor; kamerası olan kullanıcı
+        hiçbir şey fark etmiyor. Kilitlenen kod için çıkış yolu var ve
+        kullanıcı zaten ekranın başında: bilgisayarda "New code".
+        """
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self.MAX_CODE_ATTEMPTS and not self._code_locked:
+                self._code_locked = True
+                return True
+            return False
 
 
 # ── Defter ───────────────────────────────────────────────────────────
@@ -428,6 +465,10 @@ class Outcome:
     credential: bytes | None = None     # kayıt olduysa gönderilecek çerçeve
     record: DeviceRecord | None = None
     enrolled: bool = False              # True = yeni kayıt, False = süreklilik
+    # Elle giriş kodu bu denemeyle kilitlendi. Host yalnız günlüğe yazıyor;
+    # bilet ve QR yaşamaya devam ediyor. Sinyal olarak dönüyor çünkü
+    # `AccessGate` I/O yapmıyor ve günlüğü de tanımıyor.
+    code_locked: bool = False
 
 
 class AccessGate:
@@ -533,7 +574,24 @@ class AccessGate:
             return Outcome(ok=False, reject=pairing.encode_reject(
                 pairing.R_AUTH_REQUIRED,
                 "bu QR kullanıldı; host'ta yeni QR üretin"))
-        if not pairing.verify_auth(ticket.token, self._challenge, payload):
+        # İki sır da aynı bilete ait: QR'daki token ve ekrandaki 6 haneli
+        # kod. Hangisinin denendiğini istemci söylemiyor, host ikisini de
+        # deniyor — tel protokolü böylece hiç değişmedi ve yayındaki
+        # istemciler etkilenmedi.
+        #
+        # Token ÖNCE: kod kilitliyken bile QR çalışmaya devam etmeli.
+        ok = pairing.verify_auth(ticket.token, self._challenge, payload)
+        if not ok and not ticket.code_locked:
+            ok = pairing.verify_auth(
+                pairing.secret_from_code(ticket.code), self._challenge, payload)
+        if not ok:
+            # 6 hane tek başına zayıf (10^6); onu kapatan şey bu sayaç.
+            if ticket.note_code_failure():
+                return Outcome(ok=False, code_locked=True,
+                               reject=pairing.encode_reject(
+                                   pairing.R_AUTH_FAILED,
+                                   "kod çok kez yanlış girildi; "
+                                   "bilgisayardan yeni kod isteyin"))
             return Outcome(ok=False, reject=pairing.encode_reject(
                 pairing.R_AUTH_FAILED, "eşleşme doğrulaması başarısız"))
 

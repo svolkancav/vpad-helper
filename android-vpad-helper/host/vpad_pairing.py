@@ -269,6 +269,43 @@ def parse_payload(text: str) -> PairingInfo:
 
 # ── Challenge-response ───────────────────────────────────────────────
 
+CODE_LEN = 6
+CODE_LABEL = b"vpad-code-v1"
+
+
+def generate_code() -> str:
+    """Elle girilecek 6 haneli doğrulama kodu.
+
+    QR'ın alternatifi, yedeği değil: kamerası olmayan (Play services'siz
+    Android, kırık kamera) cihazın host'a girmesinin TEK yolu. Aynı bilete
+    bağlı, aynı anda yaşar ve aynı anda ölür.
+
+    Neden yalnız rakam: kullanıcı bunu ekrandan okuyup telefona yazacak.
+    Harf karıştırma (O/0, l/1) ve klavye düzeni sorunu olmasın diye alfabe
+    0-9. Baştaki sıfır korunuyor — kod bir sayı değil, altı karakterlik bir
+    dize.
+    """
+    return "".join(str(secrets.randbelow(10)) for _ in range(CODE_LEN))
+
+
+def secret_from_code(code: str) -> bytes:
+    """6 haneli kodu AUTH'un beklediği 16 baytlık anahtara çevirir.
+
+    Alan ayrımı `AUTH_LABEL`/`RESUME_LABEL` ile aynı gerekçeyle: aynı
+    baytların iki ayrı amaçta anlam kazanması engelleniyor. Böylece tel
+    protokolü hiç değişmiyor — istemci kodu bu türetmeden geçirip normal
+    AUTH gövdesini kuruyor, host da öyle doğruluyor.
+
+    **Kaba kuvvet koruması burada DEĞİL.** 10^6 uzay küçük; onu kapatan
+    şey `devices.Ticket`'ın deneme sayacı (birkaç yanlıştan sonra bilet
+    yanıyor ve kod değişiyor). Uzun bir türetme bunu çözmezdi: saldırgan
+    zaten host'a soru sormak zorunda, offline deneme yapamıyor.
+    """
+    if len(code) != CODE_LEN or not _is_ascii_digits(code):
+        raise PairingError(f"kod {CODE_LEN} haneli rakam olmalı")
+    return sha256(CODE_LABEL + code.encode("ascii")).digest()[:TOKEN_LEN]
+
+
 def make_challenge() -> bytes:
     """Her TCP bağlantısı için YENİ challenge. Tek kullanımlık."""
     return secrets.token_bytes(CHALLENGE_LEN)

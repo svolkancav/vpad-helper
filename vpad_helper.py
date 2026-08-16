@@ -77,7 +77,7 @@ APP_NAME = "V-Pad Helper"
 # On a `v*` tag build CI asserts that this equals the tag and fails the
 # build otherwise — bumping the tag alone would ship an .exe whose
 # properties still claimed the previous release.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 PUBLISHER = "V-Pad"
 HOMEPAGE = "https://vpadcontroller.com/"
@@ -180,6 +180,9 @@ class HelperState:
         # "Eşleştirme kodunu göster" bunu QR'a çeviriyor — terminali
         # olmayan kullanıcı kareyi başka türlü göremez.
         self.pairing_payload: str | None = None
+        # Aynı bilete bağlı 6 haneli elle giriş kodu. Kamerası olmayan
+        # cihazın tek girişi, o yüzden QR'la eşit yer alıyor.
+        self.pairing_code: str | None = None
         # Host'un defterindeki cihaz sayısı; None = motor henüz söylemedi.
         self.known_devices: int | None = None
         # İlk kurulum: defter boş, yani bu bilgisayara hiçbir telefon
@@ -222,6 +225,8 @@ class HelperState:
                     self.known_devices = int(value)
                 except ValueError:
                     self.known_devices = None
+            elif key == "code":
+                self.pairing_code = value or None
             elif key == "pairing":
                 first = self.pairing_payload is None
                 self.pairing_payload = value
@@ -871,7 +876,7 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
 
     NAVY, PANEL, TEXT, MUTED, OK, FAINT = ("#0b1c3f", "#122a5c", "#ffffff",
                                            "#a8bad6", "#4ade80", "#6d84ad")
-    W, H, QR_PX = 470, 618, 300
+    W, H, QR_PX = 470, 690, 268
     F = "Segoe UI"
 
     root = tk.Tk()
@@ -907,18 +912,34 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
 
     note = tk.Label(code, text="", bg=NAVY, fg=MUTED, font=(F, 9),
                     justify="center")
-    note.pack(pady=(16, 0))
+    note.pack(pady=(14, 0))
 
-    # The reminder the window was missing. The ticket is single-use and the
-    # host mints the next one the moment a phone enrols, so a second phone
-    # cannot reuse what the first one scanned — and nothing on screen said
-    # so. A user with two phones would scan the same square twice and read
-    # the failure as a broken app.
+    # ── manual entry ──
+    #
+    # Not a fallback, an equal door. Android's QR scanner is an optional
+    # Google Play services module: a phone without Play services at all
+    # (Huawei post-2019, AOSP builds) can never download it, and a phone
+    # with a broken camera never gets there either. Before this the app
+    # told those users to "connect to the internet and try again" — a
+    # promise that would never come true, with no other way in.
+    #
+    # Digits only, and read off a screen into a phone: no letters to
+    # confuse (O/0, l/1), no keyboard layout to fight.
+    tk.Label(code, text="No camera? Type this code in the app instead:",
+             bg=NAVY, fg=TEXT, font=(F, 9, "bold")).pack(pady=(14, 6))
+    digits = tk.Label(code, text="", bg=PANEL, fg=TEXT,
+                      font=("Consolas", 21, "bold"), padx=20, pady=7)
+    digits.pack()
+
+    # The ticket is single-use and the host mints the next one the moment a
+    # phone enrols, so a second phone cannot reuse what the first one used —
+    # and nothing on screen said so. A user with two phones would try the
+    # same square twice and read the failure as a broken app.
     tk.Label(code, text="Each phone needs its own code.",
-             bg=NAVY, fg=TEXT, font=(F, 9, "bold")).pack(pady=(8, 0))
+             bg=NAVY, fg=MUTED, font=(F, 9)).pack(pady=(12, 0))
 
     addr = tk.Label(code, text="", bg=NAVY, fg=FAINT, font=(F, 8))
-    addr.pack(pady=(10, 0))
+    addr.pack(pady=(8, 0))
     code.pack(fill="both", expand=True)
 
     # ── connected view ──
@@ -993,6 +1014,11 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
         canvas.config(image=photo)
         held["photo"] = photo               # or Tk garbage-collects it away
         addr.config(text=payload.split("?")[0].replace("vpad://", ""))
+        # Üçlü gruplama okumayı kolaylaştırıyor: kullanıcı bunu ekrandan
+        # telefona aktarıyor. `@status code` `pairing`den ÖNCE basıldığı
+        # için burada zaten güncel.
+        raw = state.pairing_code or ""
+        digits.config(text=f"{raw[:3]} {raw[3:]}" if len(raw) == 6 else raw)
         note.config(text="Works once. After this your phone is remembered —\n"
                          "no code needed next time.")
 
@@ -1062,6 +1088,7 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
     held.clear()
     timers.clear()
     head = note = addr = canvas = mat = code = done = done_head = None
+    digits = None
     done_mid = None
     stack = bar = draw = poll = teardown = button = None
     show_code = new_code = root = None

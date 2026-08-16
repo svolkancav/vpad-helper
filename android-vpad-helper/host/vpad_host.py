@@ -677,12 +677,20 @@ class TicketDesk:
         payload = pairing.build_payload(self._address, self._port, ticket.token)
         # Tepsi uygulaması bu satırdan okuyor: terminali olmayan kullanıcıya
         # QR'ı gösterebilmesinin tek yolu.
+        # SIRA ÖNEMLİ: kod ÖNCE. Tepsi penceresi `pairing`in değişmesine
+        # bakıp yeniden çiziyor; ters sırada, çizim iki satır arasına
+        # düşerse yeni QR'ın yanında ESKİ kod görünürdü.
+        status("code", ticket.code)
         status("pairing", payload)
         log_raw()
         log("Telefonla aşağıdaki QR'ı tarayın (TEK cihaz kaydeder):")
         log_raw()
         log_raw(pairing.render_qr_terminal(payload))
         log(f"Eşleştirme    : {payload}")
+        # Kamerası olmayan cihaz için. QR'ın yedeği değil, eşdeğeri: aynı
+        # bilet, aynı ömür.
+        log(f"Elle giriş kodu: {ticket.code}  "
+            f"(kamera yoksa telefona bu 6 haneyi yazın)")
 
     def mint(self) -> None:
         """Elle yeni bilet: eskisi ölür, yenisi basılır.
@@ -743,6 +751,13 @@ def handle_client(client: socket.socket, addr, pads: PadSet, pool: slots.SlotPoo
             outcome = gate.accept(msg_type, payload)
             if not outcome.ok:
                 client.sendall(outcome.reject)
+                if outcome.code_locked:
+                    # Yalnız günlük: bilet ve QR yaşamaya devam ediyor.
+                    # Otomatik yeni bilet basmak LAN'daki birine, beş yanlış
+                    # denemeyle meşru telefonun QR'ını öldürme imkânı
+                    # verirdi (bkz. Ticket.note_code_failure).
+                    log("⚠ elle giriş kodu arka arkaya yanlış girildi — "
+                        "kod kilitlendi, QR geçerli; yeni kod için 'New code'")
                 reason = outcome.reject[3]
                 label = ("kayıt bileti gerekli" if reason == R_AUTH_REQUIRED
                          else "doğrulama başarısız" if reason == R_AUTH_FAILED
