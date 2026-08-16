@@ -204,6 +204,17 @@ def log(message: str) -> None:
     _emit(f"[{ts()}] {message}")
 
 
+def status(key: str, value: str = "") -> None:
+    """Tepsi uygulamasının okuduğu **makine satırı**.
+
+    İnsan için basılan satırlar Türkçe ve çevrilebilir; tepsi onlara
+    tutunursa ilk çeviri değişikliğinde sessizce kör kalır. Bu satırlar
+    sabit: `@status anahtar=değer`. Kullanıcı da görür ama gürültü değil,
+    en fazla bir teknik ayrıntı.
+    """
+    log_raw(f"@status {key}={value}")
+
+
 def log_raw(message: str = "") -> None:
     _emit(message)
 
@@ -664,6 +675,9 @@ class TicketDesk:
             log("Açık kayıt bileti yok — yeni QR için Enter'a basın.")
             return
         payload = pairing.build_payload(self._address, self._port, ticket.token)
+        # Tepsi uygulaması bu satırdan okuyor: terminali olmayan kullanıcıya
+        # QR'ı gösterebilmesinin tek yolu.
+        status("pairing", payload)
         log_raw()
         log("Telefonla aşağıdaki QR'ı tarayın (TEK cihaz kaydeder):")
         log_raw()
@@ -765,6 +779,7 @@ def handle_client(client: socket.socket, addr, pads: PadSet, pool: slots.SlotPoo
 
         proto_ver, pad_name, skin = decode_hello(payload)
         log(f"▸ HELLO proto_ver={proto_ver} name={pad_name!r} skin={skin!r}")
+        status("peer", pad_name)
 
         if proto_ver != PROTO_VER:
             client.sendall(encode_reject(
@@ -867,6 +882,7 @@ def handle_client(client: socket.socket, addr, pads: PadSet, pool: slots.SlotPoo
             pool.release(lease)
             log(f"⊘ P{lease.index + 1} slotu bırakıldı → "
                 f"{pool.free}/{pool.size} boş")
+        status("peer", "")
         log(f"◈ oturum: {stats.reports} rapor, {stats.pings} ping, "
             f"{stats.dropped} atılan, {stats.bytes_in} bayt")
         try:
@@ -959,7 +975,57 @@ def _manage_devices(args) -> int:
 
 # ── Giriş noktası ────────────────────────────────────────────────────
 
+# ── İşbirlikçi kapanış ───────────────────────────────────────────────
+#
+# `vpad_helper.py` bu motoru bir DAEMON THREAD'inde koşturuyor. Python'un
+# belgeleri o thread'ler için net: "Daemon threads are abruptly stopped at
+# shutdown. Their resources … may not be released properly." Aşağıdaki
+# `finally` — mDNS vedası dahil — hiç çalışmaz.
+#
+# Vedasız kapanmanın bedeli RFC 6762'de yazılı: §10.1'in TTL=0 paketi
+# alıcıya kaydı bir saniyede sildirirken, vedasız kayıt §10'un önerdiği
+# **75 dakika** boyunca telefonun önbelleğinde kalıyor — kullanıcı
+# companion'ı kapatıyor, telefon bilgisayarı hâlâ listede gösteriyor.
+#
+# O yüzden tepsi, süreci altından çekmek yerine motora "sar" diyor.
+# Dinleyen soketi kapatmak `accept()`'i kırıyor.
+_shutdown = threading.Event()
+_listener: socket.socket | None = None
+# Açık kayıt masası; yalnız `--pair` ile var olur. `request_new_ticket()`
+# buradan geçiyor.
+_desk: "PairingDesk | None" = None
+
+
+def request_shutdown() -> None:
+    """Koşan bir `main()`'in dönmesini ister. Her thread'den güvenli."""
+    _shutdown.set()
+    sock = _listener
+    if sock is not None:
+        try:
+            sock.close()          # bloklayan accept() anında kırılır
+        except OSError:
+            pass
+
+
+def request_new_ticket() -> bool:
+    """Açık kayıt biletini yakar, yenisini basar. Her thread'den güvenli.
+
+    Konsoldaki Enter'ın karşılığı. Tepsi uygulamasının kullanıcıya "yeni QR
+    üret" diyebilmesi için tek yol: orada ne stdin var ne de `desk`'e
+    erişim. `False` = eşleşme kapalı (`--pair` verilmemiş), gösterecek QR
+    da yok.
+    """
+    desk = _desk
+    if desk is None:
+        return False
+    desk.mint()
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
+    global _listener, _desk
+    _shutdown.clear()
+    _desk = None
     parser = argparse.ArgumentParser(
         description="V-Pad host — çoklu oyuncu companion daemon'ı.",
         epilog="Tel protokolü: docs/companion-daemon.md",
@@ -1029,6 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
     # gelen istemci de REJECT alabilmek için accept edilmek zorunda.
     server.listen(8)
     port = server.getsockname()[1]
+    _listener = server
 
     addresses = lan_addresses(args.host_ip)
 
@@ -1089,6 +1156,9 @@ def main(argv: list[str] | None = None) -> int:
     log(f"Yayınlanan IP : {', '.join(addresses)}")
     log("                (telefon bu subnet'lerden birinde olmalı)")
     log(f"mDNS adı      : {service_name!r}")
+    status("addrs", ",".join(addresses))
+    status("service", service_name)
+    status("inject", inj_tag)
     log(f"Enjeksiyon    : "
         f"{VigemInjector.name if backend == 'vigem' else LogInjector.name}")
     log(f"TXT           : v={PROTO_VER}, os={os_tag}, inj={inj_tag}, "
@@ -1105,11 +1175,17 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"                • {record.device_id}")
             if known:
                 log("                (bunlar QR'sız bağlanır)")
+            # Tepsi uygulaması buna bakıp ilk kurulumu tanıyor: defter
+            # boşsa QR'ı kendiliğinden açıyor. Kayıtlı cihazı olan
+            # kullanıcının önüne her açılışta kare çıkarmak yanlış olurdu.
+            status("devices", str(len(known)))
         else:
             log("Cihaz defteri : KAPALI (--no-remember) — her bağlantı QR ister")
+            status("devices", "0")
         # `addresses[0]` bilinçli: lan_addresses zaten gerçek LAN
         # arayüzlerini VPN tünellerinden önce sıralıyor. Yanlış subnet
         # görünürse kullanıcı --host-ip ile sabitleyebilir.
+        _desk = desk
         desk.announce()
 
     if args.players == 1:
@@ -1135,8 +1211,15 @@ def main(argv: list[str] | None = None) -> int:
     log_raw()
 
     try:
-        while True:
-            client, addr = server.accept()
+        while not _shutdown.is_set():
+            try:
+                client, addr = server.accept()
+            except OSError:
+                # `request_shutdown()` soketi altımızdan kapattı. Başka her
+                # OSError gerçek bir dinleyici arızası ve yüzeye çıkmalı.
+                if _shutdown.is_set():
+                    break
+                raise
             # Bağlantı başına thread: havuz doluyken gelen telefon canlı
             # oturumların arkasında kuyruğa girmek yerine anında REJECT
             # alsın.
@@ -1146,9 +1229,12 @@ def main(argv: list[str] | None = None) -> int:
                 daemon=True,
             ).start()
     except KeyboardInterrupt:
+        pass
+    finally:
+        # Tek kapanış yolu: Ctrl+C, `request_shutdown()` ve beklenmedik bir
+        # hata aynı temizliği görmeli.
         log_raw()
         log("▣ kapatılıyor")
-    finally:
         pads.close()
         try:
             zeroconf.unregister_service(info)

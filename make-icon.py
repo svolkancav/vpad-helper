@@ -4,17 +4,21 @@
 Windows shows this icon in four places that have nothing in common: the
 installer, Explorer, the taskbar, and Add/Remove Programs. The sizes range
 from 256 px down to 16 px, and a single scaled-down bitmap does not survive
-that range. So the .ico carries THREE drawings:
+that range. So the .ico carries TWO drawings:
 
     >= 64 px   the full badge, wordmark included
-    32, 48 px  cropped to the pad + antenna, wordmark dropped
-    <= 24 px   a drawn pad silhouette
+    <= 48 px   cropped to the pad + antenna, wordmark dropped
 
-Each tier was checked by rendering it, not assumed. Scaling the full badge
-to 16 px was tried first and produces mush: the phone bezel, the antenna
-arcs and the pad's own buttons all collapse into the same grey. The bottom
-tier is therefore the same silhouette `vpad_helper.run_tray()` already
-draws for the tray, so the two icons the user sees are one mark.
+Both tiers were checked by rendering them, not assumed. Scaling the FULL
+badge to 16 px produces mush: the wordmark smears into a grey bar and the
+phone bezel, antenna arcs and pad buttons collapse into each other. The
+crop survives it — soft at 16 px, but still legibly the product's mark.
+
+An abstract pad silhouette was drawn for 16/24 px at first, on the
+assumption that the crop could not survive either. Rendered side by side it
+was the crisper icon and the wrong one: it reads as a pair of goggles and
+carries no brand at all. A blurry mark the user recognises beats a sharp
+one they do not.
 
 The source badge is a full-bleed rounded square whose corners are painted a
 light blue rather than left transparent. Windows needs them transparent, or
@@ -36,8 +40,7 @@ from PIL import Image, ImageDraw
 # Sizes Windows actually asks for. 24 is the small-taskbar case, 128 shows
 # up in the Inno Setup wizard header on high-DPI displays.
 FULL_SIZES = (256, 128, 64)
-COMPACT_SIZES = (48, 32)
-GLYPH_SIZES = (24, 16)
+COMPACT_SIZES = (48, 32, 24, 16)
 
 # Row where the artwork stops and the wordmark begins. Measured on the
 # 512 px source: the pad's lowest white pixel is y=363, the wordmark's
@@ -128,25 +131,6 @@ def _navy(img: Image.Image) -> tuple[int, int, int]:
     return tuple(sorted(c[i] for c in dark)[mid] for i in range(3))
 
 
-def _glyph(bg: tuple[int, int, int], canvas: int = 256) -> Image.Image:
-    """The pad silhouette used below 32 px.
-
-    Geometry is `vpad_helper.run_tray()`'s `icon_image()` at 4x, so the exe
-    icon and the tray icon are the same drawing — nudged up 8 px because
-    the tray version sits low to leave room pystray does not actually use.
-    Drawn large and downsampled: LANCZOS on a 256 px source gives cleaner
-    edges at 16 px than drawing 16 px directly.
-    """
-    img = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, canvas - 1, canvas - 1],
-                        radius=int(canvas * 0.18), fill=bg + (255,))
-    d.rounded_rectangle([24, 72, 232, 184], radius=48, fill=(255, 255, 255, 255))
-    d.ellipse([56, 104, 104, 152], fill=bg + (255,))
-    d.ellipse([152, 104, 200, 152], fill=bg + (255,))
-    return img
-
-
 def build(src: Path, dst: Path) -> None:
     base = Image.open(src).convert("RGBA")
     if base.width != base.height:
@@ -160,12 +144,10 @@ def build(src: Path, dst: Path) -> None:
     side = int(base.height * WORDMARK_CUT)
     left = (base.width - side) // 2
     compact = _round_corners(base.crop((left, 0, left + side, side)))
-    glyph = _glyph(_navy(base))
 
     layers = (
         [full.resize((s, s), Image.LANCZOS) for s in FULL_SIZES]
         + [compact.resize((s, s), Image.LANCZOS) for s in COMPACT_SIZES]
-        + [glyph.resize((s, s), Image.LANCZOS) for s in GLYPH_SIZES]
     )
 
     # Pillow writes every `sizes` entry from the image it is called on, so

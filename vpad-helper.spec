@@ -125,17 +125,36 @@ ICON = os.path.join(ROOT, "vpad-helper.ico")
 if IS_WINDOWS and not os.path.exists(ICON):
     raise SystemExit("vpad-helper.ico is missing — run `python make-icon.py`")
 
-# `vpad_helper` reaches its engine via a sys.path insert, which static
-# analysis cannot see — name it explicitly or the engine is left out of
-# the bundle and the .exe dies on import.
-hidden = ["vpad_daemon"]
+# The engine lives in a subfolder that `vpad_helper` puts on sys.path at
+# runtime. Static analysis cannot follow that, so the folder is named here
+# too — otherwise `import vpad_host` resolves during the build to nothing
+# and the .exe dies on its first line.
+ENGINE_DIR = os.path.join(ROOT, "android-vpad-helper", "host")
+if not os.path.exists(os.path.join(ENGINE_DIR, "vpad_host.py")):
+    raise SystemExit("engine missing: %s" % ENGINE_DIR)
+
+# vpad_host imports its siblings normally, so listing the entry point is
+# strictly enough. They are spelled out anyway because leaving one behind
+# fails at runtime, in a tray app with no console, on the user's machine.
+#
+# `qrcode` is imported lazily inside two functions (the terminal renderer
+# and the tray's pairing card). PyInstaller does walk function bodies, but
+# this one is load-bearing: without it the tray has no way to show a QR,
+# which is the only way a phone can pair.
+hidden = ["vpad_host", "vpad_devices", "vpad_pairing", "vpad_slots",
+          "qrcode", "qrcode.image.pil",
+          # The pairing window. Imported inside the function that opens it,
+          # so it is spelled out here rather than trusted to the scan.
+          "tkinter"]
 
 # vgamepad ships the ViGEmBus installer as package data. Carrying it means
 # the tray's "Install gamepad driver…" item can run a local installer
 # instead of sending the user to a GitHub releases page. Absent on
 # non-Windows build hosts — degrade quietly, the helper falls back to the
 # download URL at runtime.
-datas = []
+# The brand badge. The tray builds its icon from it at runtime, so it has
+# to be in the bundle, not just baked into the .ico.
+datas = [(os.path.join(ROOT, "brand", "icongamepad.png"), ".")]
 try:
     datas += collect_data_files("vgamepad", include_py_files=False)
 except Exception as exc:  # pragma: no cover — build-host dependent
@@ -143,25 +162,63 @@ except Exception as exc:  # pragma: no cover — build-host dependent
 
 a = Analysis(  # noqa: F821 — PyInstaller global
     [os.path.join(ROOT, "vpad_helper.py")],
-    pathex=[ROOT],
+    pathex=[ROOT, ENGINE_DIR],
     binaries=[],
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "unittest", "pydoc_data"],
+    # tkinter is NOT excluded: the pairing window is a real Tk window.
+    # Tcl/Tk is in the bundle for the splash either way, so the marginal
+    # cost is _tkinter.pyd and the tkinter package.
+    excludes=["unittest", "pydoc_data"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)  # noqa: F821 — PyInstaller global
+
+# Splash screen. Windows only — PyInstaller does not support it on macOS,
+# and this same spec drives make-dmg.sh.
+#
+# It buys the two seconds between the double-click and the tray icon. A
+# tray app opens no window, Windows 11 hides new tray icons behind the
+# overflow arrow, and the first field report about this app was that it
+# "doesn't open". The cost is ~7 MB of Tcl/Tk in the bundle.
+#
+# `vpad_helper` MUST close it (see `_close_splash`): the splash lives
+# until it is told to go, and a tray app never exits on its own — an
+# uncancelled splash would sit always-on-top for the whole session.
+SPLASH_PNG = os.path.join(ROOT, "vpad-splash.png")
+splash = None
+if IS_WINDOWS:
+    if not os.path.exists(SPLASH_PNG):
+        raise SystemExit("vpad-splash.png is missing — run `python make-splash.py`")
+    splash = Splash(  # noqa: F821 — PyInstaller global
+        SPLASH_PNG,
+        binaries=a.binaries,
+        datas=a.datas,
+        # Lands inside the darker band at the bottom of the artwork, which
+        # is left empty by make-splash.py for exactly this.
+        text_pos=(24, 214),
+        text_size=10,
+        text_color="#a8bad6",
+        text_default="Starting…",
+        always_on_top=True,
+    )
 
 # One EXE() call for both layouts. The only difference is where the
 # payload goes: inside the executable (one-file) or beside it (one-dir,
 # where `exclude_binaries` hands it to COLLECT instead).
 _payload = [] if ONEDIR else [a.binaries, a.datas]
 
+# The splash's own Tcl/Tk binaries follow the same rule as the rest of the
+# payload: inside the .exe for one-file, handed to COLLECT for one-dir.
+_splash = ([] if splash is None
+           else [splash] + ([] if ONEDIR else [splash.binaries]))
+
 exe = EXE(  # noqa: F821 — PyInstaller global
     pyz,
     a.scripts,
+    *_splash,
     *_payload,
     [],
     exclude_binaries=ONEDIR,
@@ -185,6 +242,7 @@ exe = EXE(  # noqa: F821 — PyInstaller global
 if ONEDIR:
     coll = COLLECT(  # noqa: F821 — PyInstaller global
         exe,
+        *([splash.binaries] if splash is not None else []),
         a.binaries,
         a.datas,
         strip=False,

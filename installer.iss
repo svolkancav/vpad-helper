@@ -16,7 +16,7 @@
 ;     CI is skipped when no certificate is configured.
 ;
 ; Build (after `VPAD_ONEDIR=1 pyinstaller vpad-helper.spec`):
-;     iscc /DAppVersion=0.2.2 installer.iss
+;     iscc /DAppVersion=0.3.0 installer.iss
 ;
 ; AppVersion is passed in by CI so it cannot drift from vpad_helper.py's
 ; __version__; the fallback below only exists for a local run.
