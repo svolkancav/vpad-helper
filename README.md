@@ -103,3 +103,33 @@ one phone at a time.
 The helper talks to nothing but your phone, over your own network. No accounts, no
 telemetry, no outbound connections. It listens on an ephemeral TCP port and announces
 itself over mDNS so the phone can find it; that traffic never leaves your LAN.
+
+## host/ — the next-generation engine (v0.3, Windows-first)
+
+`host/vpad_host.py` is the protocol engine that the Android app (2.x, Wi-Fi
+transport) speaks today, upstreamed from the V-Pad app repository so this
+stays the single companion for the whole brand:
+
+- **Multi-player**: up to 4 phones, one virtual Xbox 360 pad per slot on
+  Windows through ViGEmBus (`--players 4`, verified against the real
+  driver by reading the pads back through XInput).
+- **Pairing tickets**: the QR is a one-shot enrollment ticket, not an
+  access key — each device earns its own credential with a 30-day expiry
+  (`--pair`, `--forget`, `--list-devices`), plus a 6-digit manual code
+  for phones without a camera or Play services.
+- **Session resume**: a returning phone reconnects without rescanning.
+- The legacy single-player daemon (`vpad_daemon.py`, spoken by the iOS
+  app) stays untouched at the repo root; macOS keyboard/mouse injection
+  is deliberately out of scope for the new engine, so the macOS build
+  keeps shipping from the existing line.
+
+Run it from source:
+
+```
+pip install -r host/requirements.txt   # zeroconf (+ vgamepad on Windows, qrcode)
+python host/vpad_host.py --players 2 --pair
+```
+
+Tests live next to it (`host/test_*.py`, plain `python -m pytest host/`).
+Code comments are currently Turkish — they came verbatim from the app
+repository where the engine is developed and device-tested.

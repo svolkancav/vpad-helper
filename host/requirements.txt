@@ -1,0 +1,10 @@
+# V-Pad host engine (host/vpad_host.py) — Python 3.10+
+#
+# The engine only needs zeroconf. The other two are per-feature:
+# vgamepad drives the real virtual Xbox 360 pads through the ViGEmBus
+# driver (Windows only — install ViGEmBus first), and qrcode renders
+# the pairing ticket for --pair. Without qrcode the host still prints
+# a 6-digit code, so pairing works on machines that can't show a QR.
+zeroconf>=0.130
+vgamepad>=0.1.0; sys_platform == "win32"
+qrcode>=7.0
