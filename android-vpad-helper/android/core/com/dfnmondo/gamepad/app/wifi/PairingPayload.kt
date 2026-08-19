@@ -20,13 +20,41 @@ package com.dfnmondo.gamepad.app.wifi
  *    vermek, kötü niyetli bir QR'ın telefonu internetteki bir sunucuya
  *    yönlendirmesine ve DNS rebinding ile LAN kontrolünün baypas edilmesine
  *    kapı açardı.
- *  - **LAN dışı adres kabul edilmez.** `vpad://8.8.8.8:80?...` taransa bile
- *    bağlanılmaz.
+ *  - **LAN dışı adres kabul edilmez** — ama YALNIZ bu kapıdan geçenler
+ *    için. `vpad://8.8.8.8:80?...` taransa bağlanılmaz.
+ *
+ * ⚠️ **Bu bir sistem değişmezi DEĞİL.** Uygulamanın ikinci bir adres
+ * kaynağı var ve o buradan geçmiyor: `HostDiscovery` mDNS'ten gelen adresi
+ * hiçbir LAN süzgecinden geçirmeden `Host`'a koyuyor, `WifiSession` de hem
+ * elle giriş kodu hem `RESUME` yolunda `PairingInfo`'yu doğrudan o adresle
+ * kuruyor. LAN'daki biri `_vpad-bridge._tcp`'yi istediği A kaydıyla ilan
+ * ederse o adres denetlenmez.
  */
 object PairingPayload {
 
     const val SCHEME = "vpad://"
-    const val PAYLOAD_VERSION = 1
+
+    /**
+     * QR yükü sürümü — **yetenek bildirimi olarak da kullanılıyor.**
+     *
+     * Host, kimliği sarmalanmış ([WifiFrameCodec.T_CREDENTIAL_ENC])
+     * göndermeden önce telefonun onu çözebildiğini bilmek zorunda. Ama
+     * o çerçeve AUTH'un hemen ardından, HELLO'dan ÖNCE geliyor; yani
+     * telefonun tek söz hakkı olan HELLO çok geç, AUTH'un gövdesi de
+     * sabit uzunlukta. Kaldıraç bu yüzden QR'ın kendisi: **v2 bir QR'ı
+     * yalnız v2 anlayan bir istemci ayrıştırabilir.**
+     *
+     * Python karşılığı: `vpad_pairing.PAYLOAD_VERSION`.
+     */
+    const val PAYLOAD_VERSION = 2
+
+    /**
+     * Hâlâ kabul edilen en eski sürüm.
+     *
+     * ARALIK kabul ediliyor, eşitlik değil: güncel telefon, henüz
+     * güncellenmemiş bir host'un bastığı v1 QR'ı da okuyabilmeli.
+     */
+    const val PAYLOAD_VERSION_MIN = 1
     const val TOKEN_LEN = 16
 
     /** Bir sekizli grubun üst sınırı dahil aralığı. */
@@ -116,7 +144,12 @@ object PairingPayload {
     fun parse(raw: String): PairingInfo {
         val text = raw.trim()
 
-        if (!text.startsWith(SCHEME)) throw PairingException("şema vpad:// değil")
+        if (!text.startsWith(SCHEME)) {
+            throw PairingException(
+                "şema vpad:// değil",
+                PairingException.Kind.NOT_A_VPAD_CODE,
+            )
+        }
         val body = text.substring(SCHEME.length)
 
         val queryStart = body.indexOf('?')
@@ -140,6 +173,7 @@ object PairingPayload {
             throw PairingException(
                 "adres LAN değil veya IPv4 literal değil: '$host' — " +
                     "kötü niyetli QR olabilir",
+                PairingException.Kind.NOT_LAN,
             )
         }
 
@@ -159,8 +193,9 @@ object PairingPayload {
         }
 
         val versionText = params["v"] ?: throw PairingException("sürüm (v) yok")
+        val version = versionText.toIntOrNull()
         if (versionText.isEmpty() || versionText.any { it !in '0'..'9' } ||
-            versionText.toIntOrNull() != PAYLOAD_VERSION
+            version == null || version !in PAYLOAD_VERSION_MIN..PAYLOAD_VERSION
         ) {
             throw PairingException(
                 "desteklenmeyen payload sürümü: '$versionText' " +
@@ -219,8 +254,51 @@ class PairingInfo(
         (host.hashCode() * 31 + port) * 31 + token.contentHashCode()
 }
 
-/** Geçersiz veya düşmanca eşleşme verisi. */
-class PairingException(message: String) : IllegalArgumentException(message)
+/**
+ * Geçersiz veya düşmanca eşleşme verisi.
+ *
+ * ## Neden [kind] var — mesaj metnine bakmak kırılgandı
+ *
+ * Arayüz, reddin sebebine göre farklı bir cümle gösteriyor ("bu bir V-Pad
+ * kodu değil" ile "bu kod yerel ağının dışını gösteriyor" aynı şey değil).
+ * O ayrım eskiden `CodeScannerPairing`'de **hata mesajının içinde "LAN"
+ * geçiyor mu** diye bakılarak yapılıyordu.
+ *
+ * İki sebeple yanlıştı:
+ *
+ *  1. **Sınıflandırmayı metne bağlamak.** Mesaj bir gün yeniden yazılırsa
+ *     derleyici hiçbir şey söylemez; dal sessizce yanlış anahtara düşer.
+ *     Kotlin'de bunun karşılığı tip: `when` derleyici tarafından
+ *     denetlenir, `contains` denetlenmez.
+ *  2. **Metin Türkçe.** Yerelleştirilebilir (ya da yalnızca insan diline
+ *     ait) bir dizeyi akış kontrolünde kullanmak, çeviri ya da düzeltme
+ *     geldiği anda davranışı değiştirir.
+ *
+ * Varsayılan [Kind.MALFORMED]: on altı fırlatma noktasının çoğu "biçim
+ * bozuk" demek ve hepsini tek tek etiketlemek gürültü olurdu. Yalnızca
+ * arayüzün AYRI bir cümle gösterdiği iki sebep açıkça işaretleniyor.
+ */
+class PairingException(
+    message: String,
+    val kind: Kind = Kind.MALFORMED,
+) : IllegalArgumentException(message) {
+
+    enum class Kind {
+        /** `vpad://` ile başlamıyor — muhtemelen bambaşka bir QR. */
+        NOT_A_VPAD_CODE,
+
+        /**
+         * Adres yerel ağda değil ya da IPv4 literal değil.
+         *
+         * Kullanıcıya ayrı söylenmesi gereken tek ret: kod okunabilir ama
+         * bilerek yanlış yeri gösteriyor olabilir.
+         */
+        NOT_LAN,
+
+        /** Biçim hatası: port, token, sürüm, sorgu — hepsi buraya düşer. */
+        MALFORMED,
+    }
+}
 
 internal fun ByteArray.toHex(): String {
     val sb = StringBuilder(size * 2)

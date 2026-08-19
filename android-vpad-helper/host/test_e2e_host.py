@@ -337,6 +337,11 @@ class EnrollmentTest(unittest.TestCase):
                 self.assertIsNone(client.slot)  # tek oyuncuda SLOT gönderilmiyor (spec §4.9)
                 # Host kimlik verdi ve istemci onu yakaladı.
                 self.assertIsNotNone(client.issued_credential)
+                # …ve SOKETTEN gelen çerçeve SARMALANMIŞ olandı. Bu satır
+                # olmadan "kimlik geldi" ile "kimlik şifreli geldi" ayrımı
+                # yalnız dolaylı kanıtlanıyordu (2026-08-19).
+                self.assertEqual(
+                    pairing.T_CREDENTIAL_ENC, client.credential_frame_type)
                 device_id, key = client.issued_credential
                 self.assertEqual(devices.DEVICE_KEY_LEN, len(key))
                 self.assertEqual([device_id],

@@ -180,6 +180,14 @@ class VPadClient:
         self.paired = False
         # Kayıt sonrası host'un verdiği kimlik; istemci bunu SAKLAMALI.
         self.issued_credential: tuple[str, bytes] | None = None
+        # Sarmalanmış kimliği (0x16) çözmek için gerekiyor: anahtar
+        # `HKDF(token, challenge ‖ nonce)` ile türetiliyor.
+        self._challenge: bytes | None = None
+        # SOKETTEN görülen kimlik çerçevesinin tipi (0x15 mi 0x16 mı).
+        # Testler bunu doğrudan iddia edebilsin diye tutuluyor: yoksa
+        # "kimlik geldi" ile "kimlik ŞİFRELİ geldi" ayrımı yalnız dolaylı
+        # kanıtlanabiliyordu.
+        self.credential_frame_type: int | None = None
         # Host'un atadığı oyuncu indeksi (0..3); None = tek oyunculu host.
         self.slot: int | None = None
 
@@ -239,6 +247,7 @@ class VPadClient:
                     raise ProtocolError(
                         f"challenge {pairing.CHALLENGE_LEN} bayt olmalı, "
                         f"{len(payload)} geldi")
+                self._challenge = payload
                 if self.credential is not None:
                     # Kayıtlı cihaz: QR'a hiç bakmıyoruz.
                     device_id, key = self.credential
@@ -356,10 +365,29 @@ class VPadClient:
         if msg_type == pairing.T_SLOT and payload:
             self.slot = payload[0]
         elif msg_type == pairing.T_CREDENTIAL:
+            self.credential_frame_type = msg_type
             try:
                 self.issued_credential = devices.parse_credential(payload)
             except devices.DeviceError:
                 # Bozuk kimlik = süreklilik yok, ama oturum sürebilir.
+                self.issued_credential = None
+        elif msg_type == pairing.T_CREDENTIAL_ENC:
+            self.credential_frame_type = msg_type
+            # Sarmalanmış kimlik (2026-08-19). Host bunu YALNIZ QR
+            # token'ıyla doğrulanmış kayıtlarda gönderiyor; 6 haneli kod
+            # yolunda hâlâ 0x15 geliyor.
+            body = None
+            if self._challenge is not None:
+                body = pairing.unwrap_credential(
+                    self.info.token, self._challenge, payload)
+            if body is None:
+                # Etiket tutmadı ya da challenge yok: süreklilik yok, ama
+                # oturumu düşürmüyoruz — yan kanal sözleşmesi bu.
+                self.issued_credential = None
+                return
+            try:
+                self.issued_credential = devices.parse_credential(body)
+            except devices.DeviceError:
                 self.issued_credential = None
 
     def _raise_reject(self, payload: bytes) -> None:

@@ -11,8 +11,14 @@ import java.net.SocketTimeoutException
  * WiFi gamepad istemcisi: eşleşir, bağlanır, rapor gönderir.
  *
  * Yürütülebilir şartname: `host/vpad_reference_client.py` → `VPadClient`.
- * Davranış tartışmalı hâle gelirse doğru cevap oradadır; bu sınıf onun
- * birebir çevirisidir.
+ * **Kapsamı sınırlı:** el sıkışma sırası ve çerçeve semantiği birebir, ve
+ * tartışma o konulardaysa doğru cevap oradadır.
+ *
+ * Referansta KARŞILIĞI OLMAYANLAR — burada Android'e özgü olarak eklendi:
+ * kalp atışı ([startHeartbeat]), [cancel], durum yayını
+ * ([WifiConnectionState] dinleyicisi) ve `credentialSink`. Zaman aşımları da
+ * ayrışmış (Python tek 10 sn; burada 8 sn bağlanma + 10 sn okuma). Bunlarda
+ * "şartnamede yok, demek gereksiz" sonucu YANLIŞTIR.
  *
  * **Bu dosya Android API'si kullanmaz** — `java.net.Socket` ve stdlib yeter.
  * Böylece JVM testlerinde gerçek soket üzerinden doğrulanabiliyor.
@@ -56,6 +62,22 @@ class WifiGamepadClient(
     /** Kalp atışının tekrarlayacağı son rapor. */
     @Volatile
     private var lastReportFrame: ByteArray? = null
+
+    /**
+     * `CREDENTIAL` gelirse çağrılacak yer. Bağlantı başına set ediliyor
+     * çünkü sahibi [connect]; alan olması, çerçeveyi karşılayan
+     * [consumeSideChannel]'ın ona ulaşabilmesi için.
+     */
+    private var credentialSink: ((DeviceCredential) -> Unit)? = null
+
+    // Sarmalanmış kimliği (0x16) çözmek için gereken iki değer. Yalnız
+    // AUTH yolunda dolduruluyor: RESUME'da host zaten yeni kimlik
+    // vermiyor, dolayısıyla sarmalanmış çerçeve de gelmiyor.
+    //
+    // Bağlantı başına SIFIRLANIYOR (bkz. [connect]): eski bir challenge'la
+    // yeni bir çerçeveyi çözmeye çalışmak sessiz bir başarısızlık olurdu.
+    private var pairingSecret: ByteArray? = null
+    private var pairingChallenge: ByteArray? = null
 
     @Volatile
     private var heartbeat: Thread? = null
@@ -104,7 +126,12 @@ class WifiGamepadClient(
      *
      * İki tarafın da birbirini beklediği kilitlenme böylece imkânsız.
      *
-     * @param heartbeatMs boşta kalp atışı aralığı; 0 → kapalı (bkz. [sendReport]).
+     * @param heartbeatMs boşta kalp atışı aralığı; 0 → kapalı (bkz. [startHeartbeat]).
+     * @param credential saklı cihaz kimliği. Varsa CHALLENGE'a `RESUME` ile
+     *   cevap verilir ve QR hiç gerekmez; yoksa `AUTH` ile ilk kayıt yapılır.
+     * @param onCredential host kayıt sonrası kalıcı kimlik verirse çağrılır.
+     *   Çağıran bunu saklamalı — saklamazsa bir sonraki bağlantı yine QR
+     *   ister, çünkü QR'daki bilet tek kullanımlıktır ve harcanmıştır.
      * @throws WifiRejectedException host açıkça reddetti
      * @throws WifiProtocolException tel üzerinde beklenmeyen şey
      * @throws IOException ağ hatası
@@ -116,6 +143,8 @@ class WifiGamepadClient(
         readTimeoutMs: Int = DEFAULT_READ_TIMEOUT_MS,
         pairWaitMs: Int = DEFAULT_PAIR_WAIT_MS,
         heartbeatMs: Long = DEFAULT_HEARTBEAT_MS,
+        credential: DeviceCredential? = null,
+        onCredential: ((DeviceCredential) -> Unit)? = null,
     ) {
         // Aynı nesne yeniden kullanılabilsin: önceki bağlantının artıkları
         // yeni akışa sızmamalı.
@@ -123,14 +152,23 @@ class WifiGamepadClient(
         paired = false
         playerSlot = null
         lastReportFrame = null
+        credentialSink = onCredential
+        pairingSecret = null
+        pairingChallenge = null
 
         emit(WifiConnectionState.Connecting(info.host, info.port))
 
         val sock = Socket()
         try {
             sock.connect(InetSocketAddress(info.host, info.port), connectTimeoutMs)
-            // Rapor kadansı (~4-8 ms) Nagle tarafından birleştirilmemeli:
-            // birleşme, girdi gecikmesini doğrudan artırır.
+            // Rapor kadansı Nagle tarafından birleştirilmemeli: birleşme
+            // girdi gecikmesini doğrudan artırır.
+            //
+            // ⚠️ Burada eskiden "(~4-8 ms)" yazıyordu. O rakamın depoda
+            // da literatürde de dayanağı yok (2026-08-19'da arandı);
+            // kaynaklı değerler Nagle+gecikmeli-ACK etkileşimi için
+            // 40 ms (Linux `TCP_DELACK_MIN`) ve en kötü durumda 500 ms'ye
+            // kadar. Kadansı bir sayıyla anlatacaksak önce ÖLÇMEK gerek.
             sock.tcpNoDelay = true
             socket = sock
             input = sock.getInputStream()
@@ -155,8 +193,37 @@ class WifiGamepadClient(
                             )
                         }
                         emit(WifiConnectionState.Pairing(info.host, info.port))
-                        val body = PairingCrypto.buildAuthBody(info.token, first.payload)
-                        write(WifiFrameCodec.encodeFrame(WifiFrameCodec.T_AUTH, body))
+                        // İKİ KAPI, TEK CHALLENGE.
+                        //
+                        // Kayıtlıysak RESUME, değilsek AUTH. Fark yalnızca
+                        // hangi sırla imzaladığımız: AUTH QR'daki biletle
+                        // (tek kullanımlık, harcanınca ölür), RESUME cihazın
+                        // kalıcı anahtarıyla. Etiketler de ayrı, yani bir
+                        // bağlamda üretilmiş imza diğerinde geçmez.
+                        if (credential != null) {
+                            write(
+                                WifiFrameCodec.encodeFrame(
+                                    WifiFrameCodec.T_RESUME,
+                                    PairingCrypto.buildResumeBody(
+                                        credential.deviceId,
+                                        credential.key,
+                                        first.payload,
+                                    ),
+                                ),
+                            )
+                        } else {
+                            // Sarmalanmış kimliği çözecek olan sır ve
+                            // challenge tam olarak bunlar; çerçeve birazdan
+                            // gelecek (AUTH'un hemen ardından).
+                            pairingSecret = info.token
+                            pairingChallenge = first.payload
+                            write(
+                                WifiFrameCodec.encodeFrame(
+                                    WifiFrameCodec.T_AUTH,
+                                    PairingCrypto.buildAuthBody(info.token, first.payload),
+                                ),
+                            )
+                        }
                         paired = true
                         // Token yanlışsa host REJECT gönderip soketi KAPATIR.
                         // Bu noktada HELLO yazmak, kapanmakta olan sokete
@@ -185,6 +252,15 @@ class WifiGamepadClient(
                 // pratikteki tek sebebi eşleşmenin reddedilmesidir; ham soket
                 // hatası yerine bunu söylemek hem daha doğru hem kullanıcının
                 // yapabileceği bir şeye işaret ediyor ("QR'ı yeniden tara").
+                // ⚠️ Bu kanca yalnız `IOException` yakalıyor, ama bu
+                // dosyanın düzenli kapanış yolu `IOException` DEĞİL:
+                // [readFrame] EOF'ta `WifiProtocolException` atıyor ve o
+                // bir `RuntimeException` ([WifiFrameCodec]). Yani host FIN
+                // gönderip REJECT yollamazsa aşağıdaki `catch (e: Exception)`
+                // devralır ve kullanıcı tam da burada engellemek istediğimiz
+                // ham metni görür. Kendi host'umuzda nadir — `_linger_close`
+                // REJECT'i FIN'den önce garantiliyor — ama üçüncü taraf
+                // host'ta ve el sıkışma penceresi dolduğunda açık.
                 if (paired && e !is SocketTimeoutException) {
                     throw WifiRejectedException(
                         WifiFrameCodec.R_AUTH_FAILED,
@@ -202,8 +278,25 @@ class WifiGamepadClient(
             // oyunculu host hiç göndermediği için beklemek, bağlanan
             // herkese bedava gecikme yazdırırdı.
             //
-            // Geç gelirse kayıp değil: bir sonraki okumada [readUntil]
-            // onu yan kanal olarak yakalar.
+            // ⚠️ **GEÇ GELİRSE KAYIPTIR.** Buradaki yorum bir zamanlar
+            // "bir sonraki okumada [readUntil] yakalar" diyordu ve yanlıştı:
+            // el sıkışmadan sonra bu soketi **okuyan kimse yok.** [ping]
+            // hiçbir yerden çağrılmıyor, kalp atışı yalnızca yazıyor. Yani
+            // host'un el sıkışma sonrası göndereceği hiçbir çerçeve —
+            // [WifiFrameCodec.T_SLOT], ileride [WifiFrameCodec.T_RUMBLE],
+            // oturum ortası `REJECT` — istemciye ulaşmıyor.
+            //
+            // Pratikte SLOT kayıp değil: host onu `HELLO_ACK` ile aynı
+            // `sendall` çağrısında yolluyor (`vpad_host.py`), yani aynı TCP
+            // segmentinde geliyor ve aşağıdaki tahliye onu buluyor. Segment
+            // bölünürse rozet gelmiyor — kozmetik.
+            //
+            // Kopma tespiti bundan etkilenmiyor: kalp atışı 2 saniyede bir
+            // yazıyor ve kapanmış soket ilk yazmada hata veriyor.
+            //
+            // Gerçek çözüm bir okuyucu iş parçacığı; bilerek ertelendi,
+            // çünkü tek kazanımı bugün kozmetik ve yeni bir eşzamanlılık
+            // yüzeyi açıyor. RUMBLE geldiği gün ZORUNLU olacak.
             drainBuffered()
 
             // Bağlantı kurulur kurulmaz nötr durumdayız. Kalp atışının
@@ -304,13 +397,42 @@ class WifiGamepadClient(
         }
     }
 
+    /**
+     * Bloklayan bir bağlanma/okumayı **dışarıdan** keser.
+     *
+     * [close] ile aynı şey değil: o, nazik kapanış (nötr + BYE) yapar ve
+     * bunun için yazma yapmak zorundadır — yani [connect] içinde bloklamış
+     * bir iş parçacığının arkasında sıra bekler. Bu metot yalnız soketi
+     * kapatıyor; bekleyen `connect`/`read` anında `IOException` alıyor ve
+     * asıl temizlik olağan hata yolundan yürüyor.
+     *
+     * Çağıran: [WifiSession.disconnect] — kullanıcının "vazgeç"i, 8 sn'lik
+     * TCP zaman aşımının arkasında beklememeli.
+     *
+     * ⚠️ **Ama yalnız EL SIKIŞMA sürerken.** Çağıran bunu
+     * `takeIf { it.state !is Connected }` ile kapıyor ve sebebi orada
+     * yazılı: kurulmuş bir oturumda soketi buradan kapatmak [close]'un
+     * nötr + BYE yazmasını imkânsız kılıyor, yani **host'ta basılı tuş
+     * bırakıyor**. Bu KDoc'a bakıp bağlı yola da `cancel()` eklemeyin.
+     */
+    fun cancel() {
+        try {
+            socket?.close()
+        } catch (_: IOException) {
+            // Zaten kapalı; iptalin amacı hâsıl.
+        }
+    }
+
     // ── Kalp atışı ──────────────────────────────────────────────────
 
     /**
      * Boşta kalan bağlantıyı canlı tutar.
      *
      * **Neden gerekli:** host, el sıkışmadan sonra sokete 10 saniyelik okuma
-     * zaman aşımı koyuyor (`vpad_daemon.py`: "PING every 2 s when idle").
+     * zaman aşımı koyuyor (`android-vpad-helper/host/vpad_host.py:839`
+     * `client.settimeout(10.0)`; üstündeki yorum "oynarken REPORT, boştayken
+     * 2 sn'de bir PING"). Eski `vpad_daemon.py` atfı ölüydü — o dosya bu
+     * depoda hiç yok, motor `vpad_host.py`.
      * Kullanıcı telefonu bırakıp 10 saniye hiçbir tuşa dokunmazsa host
      * bağlantıyı düşürür ve bunu istemci ancak bir sonraki gönderimde,
      * `ConnectionAbortedError` ile öğrenir. Yani "oyunu duraklattım, geri
@@ -319,8 +441,23 @@ class WifiGamepadClient(
      * **Neden PING değil de son raporun tekrarı:** her PING bir PONG üretir;
      * kalp atışı iş parçacığı okuma yapmadığı için o PONG'lar alım tamponunda
      * birikirdi. Raporun tekrarı yanıt istemez, protokole birebir uygundur ve
-     * host'un durum görüntüsünü de tazeler. Bluetooth tarafındaki
-     * `MaxConnectionModeController` keepalive'ı da aynı deseni kullanıyor.
+     * host'un durum görüntüsünü de tazeler.
+     *
+     * ⚠️ **Bluetooth ile AYNI DESEN DEĞİL — bilerek.** Burası eskiden
+     * "`MaxConnectionModeController` keepalive'ı da aynı deseni kullanıyor"
+     * diyordu; yanlıştı ve tehlikeliydi. BT sabit bir **nötr** çerçeve
+     * gönderiyor (`MaxConnectionModeController.kt:349-355`, `idleReport`:
+     * tuşlar 0, hat merkez, stickler 0x80); biz **son raporu** tekrarlıyoruz.
+     *
+     * Fark kozmetik değil, ters yönde: BT'nin nötrü 2026-07-26'da ölçülmüş
+     * bir hata üretti — basılı tuş sırasında araya giren keepalive host'ta
+     * ~6 ms'lik **sahte bir bırakma** yaratıyordu
+     * (`RPT btn=0x0001` → keepalive `btn=0` → `RPT btn=0x0001`). BT bunu
+     * "tel 3 sn sessizse" kapısıyla bastırdı. Bizim desenimiz o hataya
+     * **yapısal olarak bağışık**, çünkü tekrarlanan şey zaten mevcut durum.
+     *
+     * Yani bu ikisini "hizalamak" bir iyileştirme değil, düzeltilmiş bir
+     * hatayı Wi-Fi yolunda sıfırdan üretmek olur.
      *
      * Trafik akarken sessizdir: son yazmanın üzerinden [intervalMs] geçmediyse
      * hiçbir şey göndermez.
@@ -355,10 +492,20 @@ class WifiGamepadClient(
                 }
             } catch (_: InterruptedException) {
                 // close() istedi; sessizce çık.
-            } catch (_: IOException) {
-                // Bağlantı zaten kopmuş. Hatayı burada yükseltmenin anlamı
-                // yok — çağıranın bir sonraki gönderimi aynı hatayı
-                // görecek ve durumu oradan yönetecek.
+            } catch (e: IOException) {
+                // KOPMAYI BURADA DUYURMAK ZORUNDAYIZ.
+                //
+                // Eskiden bu dal sessizdi, gerekçesi "çağıranın bir sonraki
+                // gönderimi aynı hatayı görür" idi — ve o gerekçe yalnızca
+                // kullanıcı kumandaya dokunuyorken doğru. Telefonu bırakmış
+                // bir kullanıcıda sonraki gönderim hiç gelmiyor: arayüz
+                // süresiz "Bağlandı" gösteriyor, foreground service ayakta
+                // kalıyor ve kimse kopmayı öğrenmiyor. Kalp atışı zaten
+                // "bağlantı yaşıyor mu" sorusunun tek boştaki cevabı.
+                closeQuietly()
+                if (state !is WifiConnectionState.Rejected) {
+                    emit(WifiConnectionState.Failed(e.message ?: "heartbeat failed"))
+                }
             } catch (t: Throwable) {
                 // SON SAVUNMA HATTI. Buraya düşmek bir hatadır; ama uygulamayı
                 // öldürmek (yukarıdaki KDoc) ile sessizce yutmak arasındaki
@@ -439,6 +586,13 @@ class WifiGamepadClient(
      * ve bunu yapmamak, host bir gün SLOT veya RUMBLE gönderdiğinde
      * bağlantıyı kırardı — `ping()` "PONG bekleniyordu, 0x14 geldi" diye
      * patlardı.
+     *
+     * Not: §9'un "old daemons just ignore the unknown type" cümlesi
+     * DAEMON'lar için ve bir temenni ("they should be"). İstemciler için
+     * zorunluluk `docs/companion-daemon.md`'nin HELLO_ACK bölümünde:
+     * *"Clients **MUST** treat unknown intermediate frames as a side channel
+     * and ignore them"* — SLOT ve CREDENTIAL'ın sahadaki istemcileri
+     * kırmadan eklenebilmesini sağlayan şey bu.
      */
     @Throws(IOException::class)
     private fun readUntil(wanted: Int): WifiFrameCodec.Frame {
@@ -453,8 +607,45 @@ class WifiGamepadClient(
 
     /** Yan kanal çerçevesi: tanıyorsak işleriz, tanımıyorsak atarız. */
     private fun consumeSideChannel(frame: WifiFrameCodec.Frame) {
-        if (frame.type == WifiFrameCodec.T_SLOT && frame.payload.isNotEmpty()) {
-            playerSlot = frame.payload[0].toInt() and 0xFF
+        when (frame.type) {
+            WifiFrameCodec.T_SLOT ->
+                if (frame.payload.isNotEmpty()) {
+                    playerSlot = frame.payload[0].toInt() and 0xFF
+                }
+
+            // Kayıt tamamlandı: host kalıcı kimliğimizi veriyor.
+            //
+            // Burada karşılanması ŞART. Host bunu AUTH'un hemen ardından,
+            // biz HELLO'yu göndermeden yolluyor; yani çerçeve ya tamponda
+            // bekliyor ya da HELLO_ACK'i beklerken geliyor. İki yol da
+            // `consumeSideChannel`'dan geçtiği için tek nokta yetiyor.
+            //
+            // Bozuk gövdede sessizce geçiliyor: `parseCredential` null
+            // dönüyor ve oturum sürüyor. Sürekliliği kaybederiz, bağlantıyı
+            // değil — çalışan bir oyunu gelecekteki bir kolaylık uğruna
+            // düşürmek yanlış takas olurdu.
+            WifiFrameCodec.T_CREDENTIAL ->
+                PairingCrypto.parseCredential(frame.payload)?.let { (id, key) ->
+                    credentialSink?.invoke(DeviceCredential(id, key))
+                }
+
+            // Aynı kimlik, şifreli taşınmış hali (2026-08-19). Host bunu
+            // yalnız QR token'ıyla doğrulanmış kayıtlarda gönderiyor.
+            //
+            // Çözülemezse SESSİZCE geçiliyor — 0x15'teki gerekçenin
+            // aynısı: sürekliliği kaybetmek, çalışan bir oturumu düşürmeye
+            // yeğdir. Kullanıcı bir daha QR okutur.
+            WifiFrameCodec.T_CREDENTIAL_ENC -> {
+                val secret = pairingSecret
+                val challenge = pairingChallenge
+                if (secret != null && challenge != null) {
+                    PairingCrypto.unwrapCredential(secret, challenge, frame.payload)
+                        ?.let { PairingCrypto.parseCredential(it) }
+                        ?.let { (id, key) ->
+                            credentialSink?.invoke(DeviceCredential(id, key))
+                        }
+                }
+            }
         }
     }
 

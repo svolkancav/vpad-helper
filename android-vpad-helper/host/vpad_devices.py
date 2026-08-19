@@ -141,13 +141,44 @@ def encode_resume(device_id: str, key: bytes, challenge: bytes,
 
 
 def encode_credential(device_id: str, key: bytes) -> bytes:
+    """Eski, DÜZ METİN kimlik çerçevesi (0x15).
+
+    Yayındaki istemciler (Play'deki eski sürüm, App Store'daki iOS
+    uygulaması) ve 6 haneli kod yolu bunu kullanmaya devam ediyor.
+    Sarmalanmış karşılığı `encode_credential_enc`.
+    """
+    return pairing.encode_frame(
+        pairing.T_CREDENTIAL, credential_body(device_id, key))
+
+
+def credential_body(device_id: str, key: bytes) -> bytes:
+    """0x15'in gövdesi — sarmalanmış çerçevenin de DÜZ METNİ budur.
+
+    İkisinin aynı gövdeyi taşıması bilinçli: çözen taraf sarmalamayı
+    açtıktan sonra mevcut `parse_credential`'ı olduğu gibi kullanıyor,
+    ayrı bir ayrıştırıcı bakımı gerekmiyor.
+    """
     raw = device_id.encode("ascii")
     if not 1 <= len(raw) <= 255:
         raise DeviceError("cihaz kimliği 1..255 bayt olmalı")
     if len(key) != DEVICE_KEY_LEN:
         raise DeviceError(f"cihaz anahtarı {DEVICE_KEY_LEN} bayt olmalı")
+    return bytes([len(raw)]) + raw + key
+
+
+def encode_credential_enc(device_id: str, key: bytes, secret: bytes,
+                          challenge: bytes) -> bytes:
+    """Sarmalanmış kimlik çerçevesi (0x16) — anahtar telde şifreli gider.
+
+    `secret` biletin QR token'ı; `challenge` o bağlantının challenge'ı.
+    İkisi de karşı tarafta zaten var, yani telde fazladan bir şey
+    taşımıyoruz (nonce hariç, o da gizli değil).
+    """
     return pairing.encode_frame(
-        pairing.T_CREDENTIAL, bytes([len(raw)]) + raw + key)
+        pairing.T_CREDENTIAL_ENC,
+        pairing.wrap_credential(
+            secret, challenge, credential_body(device_id, key)),
+    )
 
 
 def parse_credential(payload: bytes) -> tuple[str, bytes]:
@@ -581,6 +612,13 @@ class AccessGate:
         #
         # Token ÖNCE: kod kilitliyken bile QR çalışmaya devam etmeli.
         ok = pairing.verify_auth(ticket.token, self._challenge, payload)
+        # HANGİ sırrın tuttuğu, kimliğin sarmalanıp sarmalanmayacağını
+        # belirliyor (2026-08-19). Token tuttuysa istemci QR'ı okumuş
+        # demektir; host artık yalnız v2 QR bastığı için o istemcinin
+        # sarmalanmış çerçeveyi çözebildiği KANITLANMIŞ olur. 6 haneli kod
+        # yolunda böyle bir kanıt yok ve o sır zaten ~20 bit — sarmalamak
+        # pasif dinleyiciye karşı korumazdı (çevrimdışı 10^6 deneme).
+        via_token = ok
         if not ok and not ticket.code_locked:
             ok = pairing.verify_auth(
                 pairing.secret_from_code(ticket.code), self._challenge, payload)
@@ -608,5 +646,10 @@ class AccessGate:
             return Outcome(ok=True, enrolled=True)
 
         record = self._store.enroll(name="")
-        return Outcome(ok=True, credential=encode_credential(
-            record.device_id, record.key), record=record, enrolled=True)
+        frame = (
+            encode_credential_enc(
+                record.device_id, record.key, ticket.token, self._challenge)
+            if via_token
+            else encode_credential(record.device_id, record.key)
+        )
+        return Outcome(ok=True, credential=frame, record=record, enrolled=True)

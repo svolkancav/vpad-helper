@@ -362,8 +362,45 @@ class AccessGateTests(StoreTestCase):
         outcome = gate.accept(p.T_AUTH, body)
         self.assertTrue(outcome.ok)
         self.assertTrue(outcome.enrolled)
-        self.assertEqual(p.T_CREDENTIAL, outcome.credential[2])
+        # QR token'ıyla kaydolan istemci SARMALANMIŞ kimlik alır (0x16):
+        # token yolundan geldiyse v2 QR'ı ayrıştırabilmiş demektir.
+        self.assertEqual(p.T_CREDENTIAL_ENC, outcome.credential[2])
         self.assertTrue(ticket.spent)
+
+        # Anahtar telde DÜZ GEÇMİYOR — bu testin asıl konusu bu.
+        self.assertNotIn(outcome.record.key, outcome.credential)
+        # Ama doğru sırla açılıyor ve içinden bugünkü gövde çıkıyor.
+        body = p.unwrap_credential(
+            ticket.token, gate.challenge, outcome.credential[3:])
+        self.assertIsNotNone(body)
+        self.assertEqual(
+            (outcome.record.device_id, outcome.record.key),
+            d.parse_credential(body))
+        # Yanlış sır açamaz.
+        self.assertIsNone(p.unwrap_credential(
+            bytes(p.TOKEN_LEN), gate.challenge, outcome.credential[3:]))
+
+    def test_manual_code_enrollment_stays_on_the_legacy_frame(self):
+        """6 haneli kod yolu SARMALANMIYOR — bilinçli sınır.
+
+        O sır ~20 bit; sarmalamak pasif dinleyiciye karşı korumazdı
+        (çevrimdışı 10^6 deneme). Ayrıca kod yolundan gelen istemcinin
+        QR'ı ayrıştırdığına dair bir kanıt yok, yani 0x16'yı çözebileceğini
+        de bilmiyoruz.
+        """
+        store = self.store()
+        ticket = d.Ticket()
+        gate = d.AccessGate(ticket, store)
+        gate.opening_frame()
+
+        secret = p.secret_from_code(ticket.code)
+        outcome = gate.accept(
+            p.T_AUTH, p.build_auth_body(secret, gate.challenge))
+        self.assertTrue(outcome.ok)
+        self.assertEqual(p.T_CREDENTIAL, outcome.credential[2])
+        self.assertEqual(
+            (outcome.record.device_id, outcome.record.key),
+            d.parse_credential(outcome.credential[3:]))
 
     def test_enrollment_without_store_grants_no_continuity(self):
         """`--no-remember`: bilet doğrulanır, kimlik verilmez."""

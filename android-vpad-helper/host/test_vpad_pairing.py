@@ -90,7 +90,7 @@ class PayloadTests(unittest.TestCase):
         text = p.build_payload("192.168.1.34", 53124, self.token)
         self.assertEqual(
             text,
-            f"vpad://192.168.1.34:53124?t={self.token_hex}&v=1",
+            f"vpad://192.168.1.34:53124?t={self.token_hex}&v={p.PAYLOAD_VERSION}",
         )
         info = p.parse_payload(text)
         self.assertEqual(info.host, "192.168.1.34")
@@ -127,7 +127,11 @@ class PayloadTests(unittest.TestCase):
             "token kısa": "vpad://192.168.1.1:80?t=abcd&v=1",
             "token hex değil": f"vpad://192.168.1.1:80?t={'z' * 32}&v=1",
             "sürüm yok": f"vpad://192.168.1.1:80?t={self.token_hex}",
-            "sürüm yanlış": f"vpad://192.168.1.1:80?t={self.token_hex}&v=2",
+            # Desteklenen aralığın ÜSTÜ. v1 ve v2 artık ikisi de geçerli
+            # (bkz. PAYLOAD_VERSION); reddedilmesi gereken, tanımadığımız
+            # bir gelecek sürüm.
+            "sürüm çok yeni": f"vpad://192.168.1.1:80?t={self.token_hex}&v=3",
+            "sürüm sıfır": f"vpad://192.168.1.1:80?t={self.token_hex}&v=0",
             "sürüm sayı değil": f"vpad://192.168.1.1:80?t={self.token_hex}&v=x",
             "biçimsiz sorgu": f"vpad://192.168.1.1:80?t={self.token_hex}&v=1&bozuk",
             "yinelenen anahtar": (

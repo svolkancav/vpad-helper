@@ -55,6 +55,16 @@ T_SLOT = 0x14
 T_RESUME = 0x07      # istemci → host: kayıtlı cihaz kimliğiyle giriş
 T_CREDENTIAL = 0x15  # host → istemci: kayıt sonrası verilen cihaz kimliği
 
+# Sarmalanmış kimlik (2026-08-19). 0x15 anahtarı DÜZ METİN taşıyordu ve
+# taşıma TLS'siz: WPA2-PSK bir ev ağında Wi-Fi parolasını bilen biri
+# 4-way handshake'i yakalayıp trafiği çözebiliyor (CWE-319). Bu tip aynı
+# gövdeyi, QR bileti token'ından türetilen anahtarla şifreli taşır.
+#
+# 0x15 KALDIRILMADI: yayındaki istemciler (Play'deki 2.0.2+49 ve App
+# Store'daki iOS uygulaması) onu bekliyor. Hangisinin gönderileceğini
+# biletin QR sürümü belirliyor — bkz. PAYLOAD_VERSION.
+T_CREDENTIAL_ENC = 0x16
+
 # vpad_daemon.py'deki karşılıkları — bu modül daemon'ı içe aktarmadığı için
 # burada da tanımlı. Değerler DEĞİŞTİRİLEMEZ, iki dosya aynı teli konuşuyor.
 T_HELLO = 0x01
@@ -72,7 +82,24 @@ R_DEVICE_UNKNOWN = 0x06
 MAX_FRAME = 4096  # vpad_daemon ile aynı
 
 SCHEME = "vpad://"
-PAYLOAD_VERSION = 1
+
+# QR yükü sürümü — **yetenek bildirimi olarak da kullanılıyor.**
+#
+# Host, kimliği sarmalanmış (T_CREDENTIAL_ENC) göndermeden ÖNCE telefonun
+# bunu çözebildiğini bilmek zorunda. Ama spec §4.8 gereği CREDENTIAL,
+# AUTH'un hemen ardından ve HELLO'dan ÖNCE gidiyor — yani telefonun tek
+# söz hakkı olan HELLO çok geç geliyor, AUTH'un gövdesi de sabit uzunlukta
+# (uzatmak yayındaki `verify_auth`'u kırar).
+#
+# Kaldıraç bu yüzden QR'ın kendisi: **v2 bir QR'ı yalnızca v2 anlayan bir
+# telefon ayrıştırabilir.** Bileti v2 QR'dan gelen bir istemci AUTH'u
+# geçtiyse, sarmalamayı çözebildiğini KANITLAMIŞ olur.
+#
+# Bedeli açık: yayındaki eski uygulama (2.0.2+49) v2 QR'ı okuyunca
+# "desteklenmeyen payload sürümü" ile düşer — sessiz değil, açık bir hata.
+# Zaten kayıtlı cihazlar etkilenmez (RESUME yolu QR'a hiç uğramıyor).
+PAYLOAD_VERSION = 2
+PAYLOAD_VERSION_MIN = 1  # ayrıştırırken hâlâ kabul edilen en eski sürüm
 
 TOKEN_LEN = 16      # ham bayt (QR'da 32 hex karakter)
 CHALLENGE_LEN = 16
@@ -178,6 +205,10 @@ class PairingInfo:
     host: str
     port: int
     token: bytes
+    # Biletin geldiği QR sürümü. `version >= 2` ⇒ istemci sarmalanmış
+    # kimliği çözebilir (bkz. PAYLOAD_VERSION). Eski çağıranlar için
+    # varsayılan 1 — yani "sarmalama yok", güvenli taraf.
+    version: int = PAYLOAD_VERSION_MIN
 
     @property
     def token_hex(self) -> str:
@@ -253,7 +284,17 @@ def parse_payload(text: str) -> PairingInfo:
     version_text = params.get("v")
     if version_text is None:
         raise PairingError("sürüm (v) yok")
-    if not _is_ascii_digits(version_text) or int(version_text) != PAYLOAD_VERSION:
+    if not _is_ascii_digits(version_text):
+        raise PairingError(
+            f"desteklenmeyen payload sürümü: {version_text!r} "
+            f"(bu sürüm {PAYLOAD_VERSION})"
+        )
+    version = int(version_text)
+    # ARALIK kabul ediliyor, eşitlik değil: yeni telefon eski host'un
+    # bastığı v1 QR'ı da okuyabilmeli. Ters yön (eski telefon + v2 QR)
+    # bilinçli olarak kapalı — sarmalamayı çözemeyecek bir istemcinin
+    # kaydolmasını istemiyoruz, bkz. PAYLOAD_VERSION.
+    if not PAYLOAD_VERSION_MIN <= version <= PAYLOAD_VERSION:
         raise PairingError(
             f"desteklenmeyen payload sürümü: {version_text!r} "
             f"(bu sürüm {PAYLOAD_VERSION})"
@@ -264,7 +305,7 @@ def parse_payload(text: str) -> PairingInfo:
         raise PairingError("token (t) yok")
     token = token_from_hex(token_text)
 
-    return PairingInfo(host=host, port=port, token=token)
+    return PairingInfo(host=host, port=port, token=token, version=version)
 
 
 # ── Challenge-response ───────────────────────────────────────────────
@@ -355,6 +396,110 @@ def verify_auth(token: bytes, challenge: bytes, body: bytes) -> bool:
 # vpad_daemon.encode_frame ile aynı biçim. Burada tekrarlanıyor ki bu modül
 # ve testleri daemon'ı (ve onun zeroconf bağımlılığını) içe aktarmak zorunda
 # kalmasın.
+
+# ── Kimlik sarmalama (2026-08-19) ────────────────────────────────────
+#
+# NEDEN: `CREDENTIAL` (0x15) 32 baytlık kalıcı cihaz anahtarını DÜZ METİN
+# taşıyordu ve taşıma TLS'siz. WPA2-PSK bir ev ağında Wi-Fi parolasını
+# bilen biri (aile, misafir, eski kiracı) 4-way handshake'i yakalayıp —
+# ya da deauth ile yeniden tetikleyip — o paketi okuyabiliyor. CWE-319.
+# WPA3-SAE bu saldırıyı kapatıyor ama WPA2 hâlâ yaygın.
+#
+# NEDEN AES-GCM DEĞİL: Python standart kütüphanesinde simetrik şifre YOK.
+# `cryptography` eklemek PyInstaller paketine native wheel sokardı;
+# yayındaki exe zaten bir kez Defender'a `Wacatac.C!ml` diye takılmıştı.
+# Bu yüzden yapı tamamen HMAC-SHA256 üzerine kuruldu: RFC 5869 HKDF ile
+# anahtar akışı + ayrı anahtarla encrypt-then-MAC. İlkel yazmıyoruz,
+# yalnız standart bir kompozisyon kuruyoruz; iki dil arasındaki uyum
+# altın vektörle pinleniyor.
+#
+# NE KORUMUYOR: 6 haneli elle giriş kodu yolunu. O sır ~20 bit; sarmalama
+# yapılsa da dinleyen 10^6 adayı ÇEVRİMDIŞI dener. Onu kapatmak PAKE
+# ister (Android'in kendi ADB eşleşmesi SPAKE2 kullanıyor) ve bilinçli
+# olarak bu turun dışında bırakıldı.
+CRED_ENC_LABEL = b"vpad-cred-enc-v1"
+CRED_MAC_LABEL = b"vpad-cred-mac-v1"
+CRED_NONCE_LEN = 16
+CRED_TAG_LEN = 16
+
+
+def hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
+    """RFC 5869 HKDF (SHA-256). Kotlin karşılığı: PairingCrypto.hkdf.
+
+    Extract-then-Expand; `salt` HMAC anahtarı, `ikm` mesajdır (RFC 5869
+    §2.2 — sırası ters yazmak sessizce farklı ama "çalışır görünen" bir
+    çıktı üretir, bu yüzden altın vektörle pinlendi).
+    """
+    if length <= 0 or length > 255 * 32:
+        raise PairingError(f"hkdf uzunluğu aralık dışı: {length}")
+    prk = hmac.new(salt, ikm, sha256).digest()
+    out = bytearray()
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), sha256).digest()
+        out += block
+        counter += 1
+    return bytes(out[:length])
+
+
+def wrap_credential(secret: bytes, challenge: bytes, plaintext: bytes,
+                    nonce: bytes | None = None) -> bytes:
+    """CREDENTIAL gövdesini şifreler → `nonce(16) ‖ ct ‖ tag(16)`.
+
+    `plaintext` bugünkü 0x15 gövdesinin AYNISI (`id_len ‖ id ‖ key`), yani
+    çözen taraf mevcut ayrıştırıcıyı olduğu gibi kullanabiliyor.
+
+    Anahtar akışı `challenge ‖ nonce` tuzuyla türetiliyor: challenge zaten
+    bağlantı başına yeni, nonce da mesaj başına — ikisi birlikte akışın
+    tekrar kullanılmasını imkânsız kılıyor (XOR akış şifresinde tekrar
+    kullanım felakettir).
+    """
+    if len(secret) != TOKEN_LEN:
+        raise PairingError(f"sır {TOKEN_LEN} bayt olmalı")
+    if len(challenge) != CHALLENGE_LEN:
+        raise PairingError(f"challenge {CHALLENGE_LEN} bayt olmalı")
+    if not plaintext:
+        raise PairingError("boş gövde sarmalanamaz")
+    if nonce is None:
+        nonce = secrets.token_bytes(CRED_NONCE_LEN)
+    if len(nonce) != CRED_NONCE_LEN:
+        raise PairingError(f"nonce {CRED_NONCE_LEN} bayt olmalı")
+
+    salt = challenge + nonce
+    keystream = hkdf_sha256(secret, salt, CRED_ENC_LABEL, len(plaintext))
+    mac_key = hkdf_sha256(secret, salt, CRED_MAC_LABEL, 32)
+    ciphertext = bytes(p ^ k for p, k in zip(plaintext, keystream))
+    # Encrypt-then-MAC: etiket ŞİFRELİ metnin üstünde. Tersi (MAC-then-
+    # encrypt) çözmeden önce doğrulama yapamamak demekti.
+    tag = hmac.new(mac_key, nonce + ciphertext, sha256).digest()[:CRED_TAG_LEN]
+    return nonce + ciphertext + tag
+
+
+def unwrap_credential(secret: bytes, challenge: bytes,
+                      body: bytes) -> bytes | None:
+    """Sarmalanmış gövdeyi çözer; etiket tutmazsa `None` — istisna DEĞİL.
+
+    Bozuk/sahte çerçeve oturumu düşürmemeli: bu tip el sıkışmanın yan
+    kanalı, `parse_credential`'ın hoşgörüsüyle aynı gerekçe.
+    """
+    if len(secret) != TOKEN_LEN or len(challenge) != CHALLENGE_LEN:
+        return None
+    if len(body) <= CRED_NONCE_LEN + CRED_TAG_LEN:
+        return None
+    nonce = body[:CRED_NONCE_LEN]
+    ciphertext = body[CRED_NONCE_LEN:-CRED_TAG_LEN]
+    tag = body[-CRED_TAG_LEN:]
+
+    salt = challenge + nonce
+    mac_key = hkdf_sha256(secret, salt, CRED_MAC_LABEL, 32)
+    expected = hmac.new(mac_key, nonce + ciphertext, sha256).digest()
+    if not hmac.compare_digest(tag, expected[:CRED_TAG_LEN]):
+        return None
+
+    keystream = hkdf_sha256(secret, salt, CRED_ENC_LABEL, len(ciphertext))
+    return bytes(c ^ k for c, k in zip(ciphertext, keystream))
+
 
 def encode_frame(msg_type: int, payload: bytes = b"") -> bytes:
     total = 3 + len(payload)
