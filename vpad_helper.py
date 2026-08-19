@@ -1266,6 +1266,33 @@ def run_tray(state: HelperState, pump: threading.Thread) -> int:
                     pass
             threading.Event().wait(1.0)
 
+        # THE ENGINE IS GONE. Say so (2026-08-19 audit).
+        #
+        # `pump` is the ENGINE thread despite the name — `main` calls
+        # `run_tray(state, engine_thread)`. So this loop ends exactly when
+        # the bridge dies, and until now that was all that happened: this
+        # thread returned, while `icon.run()` kept the tray alive forever.
+        # The user was left with a live icon, a menu that opens, and a
+        # pairing code that no longer means anything — with no phone able
+        # to connect and nothing on screen admitting it. The only evidence
+        # was a line in helper.log, which nobody reads unprompted.
+        #
+        # The engine ends for ordinary reasons too, not just crashes: an
+        # mDNS name collision or a port that will not bind returns from
+        # `main()` normally. Same silence, same support ticket.
+        #
+        # Quit is NOT this path — that unwinds the tray loop itself, so
+        # this code does not run on a clean exit.
+        try:
+            icon.icon = icon_image(False)
+            icon.title = "%s — stopped (restart required)" % APP_NAME
+            icon.update_menu()
+            icon.notify(
+                "The connection service stopped. No phone can connect "
+                "until you quit and start %s again." % APP_NAME, APP_NAME)
+        except Exception:
+            pass
+
     def on_setup(tray_icon) -> None:
         """Runs once the tray loop is live.
 

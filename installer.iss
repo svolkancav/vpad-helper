@@ -119,6 +119,22 @@ Filename: "{app}\{#AppName}.exe"; Description: "Start {#AppName} now"; \
 ; directory in LocalAppData that nothing will ever clean up.
 Type: filesandordirs; Name: "{localappdata}\{#AppName}"
 
+; Device ledger written by vpad_devices.default_store_path(). A DIFFERENT
+; folder — "VPad", not "{#AppName}" — and that mismatch is the whole bug:
+; uninstalling used to leave it behind, holding a 32-byte permanent key per
+; paired phone.
+;
+; Two ways that hurt. Support: "uninstall and reinstall" is the most common
+; advice we give, and it reset nothing — every previously paired phone came
+; straight back in over RESUME, no QR asked. Privacy: someone selling or
+; handing over the PC uninstalls and reasonably believes the pairings went
+; with it. They did not.
+;
+; Deleting it here is the honest reading of "uninstall": the pairings are
+; app state, not user documents. An in-place UPGRADE is unaffected —
+; Inno processes [UninstallDelete] only on actual uninstallation.
+Type: filesandordirs; Name: "{localappdata}\VPad"
+
 [Code]
 procedure StopHelper();
 var

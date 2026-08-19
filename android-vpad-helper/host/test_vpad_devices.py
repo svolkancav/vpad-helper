@@ -380,6 +380,45 @@ class AccessGateTests(StoreTestCase):
         self.assertIsNone(p.unwrap_credential(
             bytes(p.TOKEN_LEN), gate.challenge, outcome.credential[3:]))
 
+    def test_mint_kills_a_ticket_a_live_connection_already_captured(self):
+        """GERİLEME (2026-08-19 denetimi): "yeni QR üret" AÇIK bir el
+        sıkışmayı da öldürmeli.
+
+        `AccessGate` bileti bağlantı BAŞINA kopyalıyor. Eskiden `mint()`
+        yalnız masadaki referansı değiştiriyor, eski nesneye dokunmuyordu;
+        yani düğmeye basıldığı anda zaten CHALLENGE almış bir bağlantı,
+        elindeki eski token'la 5 saniyelik pencere boyunca kaydolmaya
+        devam edebiliyordu. Kullanıcının o düğmeye bastığı an tam olarak
+        "bu token'ı artık istemiyorum" dediği andır.
+
+        Depodaki e2e testi bunu YAKALAYAMIYOR çünkü bağlantıyı
+        `mint()`'ten SONRA açıyor — gate zaten yeni bileti görüyor. Bu test
+        sırayı bilerek tersine çeviriyor.
+        """
+        store = self.store()
+        ticket = d.Ticket()
+        gate = d.AccessGate(ticket, store)   # bağlantı bileti YAKALADI
+        gate.opening_frame()                  # CHALLENGE gitti
+
+        # …ve ancak ŞİMDİ kullanıcı "yeni QR üret"e basıyor. GERÇEK yolu
+        # çağırıyoruz (`TicketDesk.mint`), elle `try_spend()` değil:
+        # harcanmış biletin reddi zaten çalışıyordu, düzeltilen şey
+        # `mint()`'in eskiyi harcaMASIydı. Elle harcamak testi
+        # düzeltmeden ÖNCE de geçirirdi — yani hiçbir şey ölçmezdi.
+        import vpad_host
+        desk = vpad_host.TicketDesk('192.168.1.10', 5000)
+        desk._ticket = ticket          # masadaki bilet, gate'in kopyaladığı
+        desk.mint()
+        self.assertIsNot(ticket, desk.current(), 'masa yeni bilete geçmeli')
+
+        outcome = gate.accept(
+            p.T_AUTH, p.build_auth_body(ticket.token, gate.challenge))
+        self.assertFalse(outcome.ok,
+                         "iptal edilmiş bilet hâlâ kayıt yaptırıyor")
+        self.assertIsNone(outcome.credential)
+        self.assertEqual(0, len(store.devices()),
+                         "iptalden sonra hiçbir cihaz kaydolmamalı")
+
     def test_manual_code_enrollment_stays_on_the_legacy_frame(self):
         """6 haneli kod yolu SARMALANMIYOR — bilinçli sınır.
 

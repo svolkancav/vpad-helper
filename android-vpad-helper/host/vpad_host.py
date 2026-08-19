@@ -700,6 +700,22 @@ class TicketDesk:
         biletin tazelenmesi için.
         """
         with self._lock:
+            # ESKİYİ ÖNCE HARCA, sonra yenisini tak (2026-08-19 denetimi).
+            #
+            # Referansı değiştirmek YETMİYORDU: `AccessGate` bileti bağlantı
+            # başına KOPYALIYOR (`desk.current()`, `handle_client` girişinde).
+            # Yani "yeni QR üret"e basıldığı anda zaten CHALLENGE almış bir
+            # bağlantı, elindeki ESKİ nesneyi doğrulamaya devam ediyordu ve
+            # 5 saniyelik el sıkışma penceresi boyunca eski token geçerli
+            # kalıyordu. Kullanıcının bu düğmeye bastığı an tam olarak
+            # "o token'ı artık istemiyorum" dediği andır.
+            #
+            # `try_spend()` atomik ve tek kullanımlık: eski bilet o an
+            # harcanmış sayılıyor, kopyasını tutan gate de `spent` görüp
+            # reddediyor. Dönüş değeri ATILIYOR çünkü bilet zaten
+            # harcanmışsa (bir cihaz yeni kaydolduysa) yapılacak bir şey yok.
+            if self._ticket is not None:
+                self._ticket.try_spend()
             self._ticket = devices.Ticket()
         log("◈ yeni kayıt bileti üretildi — önceki QR öldü")
         self.announce()
@@ -712,6 +728,23 @@ class TicketDesk:
             count = self._enrolled
         log(f"◈ kayıt tamamlandı ({count}. cihaz) — bu QR öldü, yenisi altta")
         self.announce()
+
+
+def _serve_and_release(client: socket.socket, addr, pads: PadSet,
+                       pool: slots.SlotPool, desk: "TicketDesk | None",
+                       store: "devices.DeviceStore | None",
+                       verbose: bool) -> None:
+    """[handle_client] + bağlantı tavanı sayacının bırakılması.
+
+    Ayrı bir sarmalayıcı, çünkü `finally` ŞART: `handle_client` beklenmedik
+    bir istisnayla çıkarsa sayaç sızar ve tavan zamanla kalıcı olarak
+    dolar — yani bir hata, host'u sessizce "hiçbir telefonu kabul etmez"
+    hale getirirdi. Tam olarak kaçınmaya çalıştığımız arıza biçimi.
+    """
+    try:
+        handle_client(client, addr, pads, pool, desk, store, verbose)
+    finally:
+        _conn_slots.release()
 
 
 def handle_client(client: socket.socket, addr, pads: PadSet, pool: slots.SlotPool,
@@ -1005,6 +1038,17 @@ def _manage_devices(args) -> int:
 # O yüzden tepsi, süreci altından çekmek yerine motora "sar" diyor.
 # Dinleyen soketi kapatmak `accept()`'i kırıyor.
 _shutdown = threading.Event()
+
+# Kimlik doğrulanmadan ÖNCE yaşayan eşzamanlı bağlantı tavanı
+# (2026-08-19 denetimi). Gerçek oyuncu sayısı slot havuzuyla ayrıca
+# sınırlı; buradaki tavan el sıkışmayı bekleyen soketler için.
+#
+# 32 bilinçli olarak cömert: dört oyuncunun aynı anda bağlanması, mDNS
+# yeniden çözümlemesi ve bir-iki yeniden deneme rahatça sığar. Amaç meşru
+# kullanımı kısmak değil, thread üretimini SINIRSIZ olmaktan çıkarmak.
+MAX_PENDING_CONNS = 32
+_conn_slots = threading.Semaphore(MAX_PENDING_CONNS)
+
 _listener: socket.socket | None = None
 # Açık kayıt masası; yalnız `--pair` ile var olur. `request_new_ticket()`
 # buradan geçiyor.
@@ -1238,11 +1282,46 @@ def main(argv: list[str] | None = None) -> int:
             # Bağlantı başına thread: havuz doluyken gelen telefon canlı
             # oturumların arkasında kuyruğa girmek yerine anında REJECT
             # alsın.
-            threading.Thread(
-                target=handle_client,
-                args=(client, addr, pads, pool, desk, store, args.verbose),
-                daemon=True,
-            ).start()
+            #
+            # ⚠️ TAVAN (2026-08-19 denetimi). Buradaki thread, AUTH'tan
+            # ÖNCE açılıyor — yani kimliği doğrulanmamış herkes bir thread
+            # yaratabiliyordu ve tavan yoktu (`listen(8)` yalnız backlog).
+            # Aynı ağdaki bozuk ya da kötü niyetli bir cihaz saniyede
+            # onlarca boş bağlantı açarsa, her biri el sıkışma zaman aşımı
+            # (5 sn) boyunca yaşayacağı için thread sayısı sınırsız büyür.
+            #
+            # Tavan dolduğunda BEKLEMİYORUZ, hemen reddedip kapatıyoruz:
+            # beklemek accept döngüsünü durdurur ve saldırganın işine yarar.
+            # Meşru kullanıcı en fazla bir yeniden denemeyle geçer, çünkü
+            # gerçek oturumlar slot havuzuyla zaten sınırlı.
+            if not _conn_slots.acquire(blocking=False):
+                log(f"✗ eşzamanlı bağlantı tavanı ({MAX_PENDING_CONNS}) "
+                    f"doldu — {addr[0]} reddedildi")
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
+            try:
+                threading.Thread(
+                    target=_serve_and_release,
+                    args=(client, addr, pads, pool, desk, store, args.verbose),
+                    daemon=True,
+                ).start()
+            except RuntimeError as exc:
+                # `can't start new thread` — işletim sistemi reddetti.
+                # BU DÖNGÜYÜ ÖLDÜRMEMELİ: eskiden istisna dış
+                # `except KeyboardInterrupt`e çarpmadan kaçıyor, `finally`
+                # temizliği koşuyor ve `main()` dönüyordu. Tepsi bunu hiç
+                # yansıtmadığı için kullanıcı "ikon duruyor ama hiçbir
+                # telefon bağlanmıyor" diyordu ve sebebi yalnız log
+                # dosyasında görünüyordu.
+                _conn_slots.release()
+                log(f"✗ thread açılamadı ({exc}) — {addr[0]} reddedildi")
+                try:
+                    client.close()
+                except OSError:
+                    pass
     except KeyboardInterrupt:
         pass
     finally:
