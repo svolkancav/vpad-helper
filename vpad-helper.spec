@@ -154,7 +154,17 @@ hidden = ["vpad_host", "vpad_devices", "vpad_pairing", "vpad_slots",
 # download URL at runtime.
 # The brand badge. The tray builds its icon from it at runtime, so it has
 # to be in the bundle, not just baked into the .ico.
-datas = [(os.path.join(ROOT, "brand", "icongamepad.png"), ".")]
+#
+# The .ico ships too, and for the same reason. It was previously used ONLY
+# as the exe's Windows resource (`ICON` above), which brands the taskbar
+# and Explorer — but the pairing window asks for the file at RUNTIME
+# (`_bundled("vpad-helper.ico")` → `root.iconbitmap(...)`). Measured on an
+# installed 0.3.x build: no .ico anywhere under the install directory, so
+# that call raised, the caller swallowed it, and the window kept Tk's
+# default feather. Baking an icon into the exe does not put a readable
+# file next to it.
+datas = [(os.path.join(ROOT, "brand", "icongamepad.png"), "."),
+         (ICON, ".")]
 try:
     datas += collect_data_files("vgamepad", include_py_files=False)
 except Exception as exc:  # pragma: no cover — build-host dependent

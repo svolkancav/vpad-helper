@@ -884,10 +884,21 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
     root.configure(bg=NAVY)
     root.geometry("%dx%d" % (W, H))
     root.resizable(False, False)
-    try:
-        root.iconbitmap(_bundled("vpad-helper.ico"))
-    except Exception:
-        pass                                # cosmetic only
+    # Title-bar icon. Cosmetic, so a failure must not stop the window from
+    # opening — but it MUST be visible in the log. The previous
+    # `except Exception: pass` hid a real packaging bug for weeks: the .ico
+    # was baked into the exe as a Windows resource but never shipped as a
+    # file, so this call raised on every packaged run and the window kept
+    # Tk's default feather. Silence is what made it survive.
+    _icon = _bundled("vpad-helper.ico")
+    if not os.path.exists(_icon):
+        print("window: icon file missing at %s — title bar will use the "
+              "Tk default (check the spec's `datas`)" % _icon)
+    else:
+        try:
+            root.iconbitmap(_icon)
+        except Exception as exc:            # cosmetic only, but say so
+            print("window: iconbitmap failed (%s: %s)" % (type(exc).__name__, exc))
 
     tk.Label(root, text=APP_NAME, bg=NAVY, fg=FAINT,
              font=(F, 9)).pack(pady=(14, 0))
