@@ -215,6 +215,23 @@ def status(key: str, value: str = "") -> None:
     log_raw(f"@status {key}={value}")
 
 
+def announce_peers(pool: "slots.SlotPool") -> None:
+    """`@status peers=1:V-Pad @ 192.168.1.134;2:…` — o an bağlı HER oyuncu.
+
+    `peer=` yalnız son gelen telefonun adını taşıyordu ve bir oyuncu
+    ayrılınca boşalıyordu; dört oyunculu masada tepsi, P1 oynarken P2'nin
+    BYE'ını "kimse bağlı değil" diye okuyordu. Bu satır havuzun kendisinden
+    türetiliyor: her kiralama ve bırakmada bir kez, slot sırasıyla. Ayraçlar
+    `;` ve `:` olduğundan telefon adındaki aynı karakterler temizleniyor.
+    """
+    occ = pool.occupants()
+    items = []
+    for index in sorted(occ):
+        label = occ[index].replace(";", " ").replace(":", " ").strip()
+        items.append(f"{index + 1}:{label}")
+    status("peers", ";".join(items))
+
+
 def log_raw(message: str = "") -> None:
     _emit(message)
 
@@ -844,6 +861,7 @@ def handle_client(client: socket.socket, addr, pads: PadSet, pool: slots.SlotPoo
                 R_IN_USE, f"{pool.size} oyuncu slotunun tamamı dolu"))
             log(f"✗ reddedildi — {pool.size} slot dolu (in_use)")
             return
+        announce_peers(pool)
         injector = pads.acquire(lease.index)
 
         # SLOT yalnızca ÇOKLU oyuncuda gönderiliyor.
@@ -930,6 +948,7 @@ def handle_client(client: socket.socket, addr, pads: PadSet, pool: slots.SlotPoo
             pool.release(lease)
             log(f"⊘ P{lease.index + 1} slotu bırakıldı → "
                 f"{pool.free}/{pool.size} boş")
+            announce_peers(pool)
         status("peer", "")
         log(f"◈ oturum: {stats.reports} rapor, {stats.pings} ping, "
             f"{stats.dropped} atılan, {stats.bytes_in} bayt")

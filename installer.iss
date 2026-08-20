@@ -107,7 +107,7 @@ LicenseFile=LICENSE
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a &desktop shortcut"
 
 [Files]
 ; The whole one-dir bundle, executable and _internal alike.

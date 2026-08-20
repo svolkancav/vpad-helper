@@ -86,6 +86,31 @@ VIGEM_DOWNLOAD_URL = "https://github.com/nefarius/ViGEmBus/releases/latest"
 IS_WINDOWS = sys.platform == "win32"
 
 
+def _claim_taskbar_identity() -> None:
+    """Tell Windows this process is V-Pad Helper, not its host interpreter.
+
+    Without an explicit AppUserModelID the shell groups a window under the
+    executable that created it and paints THAT executable's icon on the
+    taskbar button — so a source run shows Python's logo (seen 2026-08-20)
+    and a packaged run can still merge with an unrelated pinned entry. The
+    window's own `iconbitmap` does not reach the taskbar; this does.
+
+    Cosmetic, and deliberately silent on failure: an old shell without the
+    API must not stop the app from starting.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes                       # noqa: PLC0415 — Windows only
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "VPad.Helper")
+    except Exception:
+        pass
+
+
+_claim_taskbar_identity()
+
+
 # ── Status plumbing ─────────────────────────────────────────────────
 #
 # The engine is console-first: it prints. Rather than rewire it into a
@@ -169,6 +194,9 @@ class HelperState:
     def __init__(self) -> None:
         self.backend = "starting…"
         self.connected_to: str | None = None
+        # O an bağlı HER oyuncu: (slot, ad, ip). Motorun `@status peers=`
+        # satırından; `connected_to` tek ada indirgenmiş eski görünümü.
+        self.peers: list[tuple[int, str, str]] = []
         self.addresses: list[str] = []
         self.driver_missing = False
         # The injector is chosen once at startup, so installing the driver
@@ -236,7 +264,13 @@ class HelperState:
                 if first and self.known_devices == 0:
                     self.offer_pairing = True
             elif key == "peer":
-                self.connected_to = value or None
+                # Eski tek-ad satırı; `peers` varken onu ezmesin — listeden
+                # türetilen değer daha doğru (P2 ayrılınca P1 hâlâ bağlı).
+                if not self.peers:
+                    self.connected_to = value or None
+            elif key == "peers":
+                self.peers = self._parse_peers(value)
+                self.connected_to = self.peers[0][1] if self.peers else None
             return
         if "Injection:" in line:
             self.backend = line.split("Injection:", 1)[1].strip()
@@ -259,7 +293,27 @@ class HelperState:
                 or "ViGEmBus backend unavailable" in line:
             self.driver_missing = True
 
+    @staticmethod
+    def _parse_peers(value: str) -> list[tuple[int, str, str]]:
+        """`1:V-Pad @ 192.168.1.134;2:Phone @ 10.0.0.7` → [(1, ad, ip), …]."""
+        out: list[tuple[int, str, str]] = []
+        for item in value.split(";"):
+            item = item.strip()
+            if not item:
+                continue
+            slot, _, label = item.partition(":")
+            name, _, ip = label.rpartition(" @ ")
+            try:
+                out.append((int(slot), (name or label).strip() or "phone", ip.strip()))
+            except ValueError:
+                continue
+        return out
+
     def summary(self) -> str:
+        if self.peers:
+            return "Connected: " + " · ".join(
+                "P%d %s%s" % (slot, name, " (%s)" % ip if ip else "")
+                for slot, name, ip in self.peers)
         if self.connected_to:
             return "Connected: %s" % self.connected_to
         if self.addresses:
@@ -876,7 +930,13 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
 
     NAVY, PANEL, TEXT, MUTED, OK, FAINT = ("#0b1c3f", "#122a5c", "#ffffff",
                                            "#a8bad6", "#4ade80", "#6d84ad")
-    W, H, QR_PX = 470, 690, 268
+    # Two more tones, both from the same blue: the primary button's accent
+    # and a hairline for outlined surfaces. Nothing else enters the palette.
+    ACCENT, ACCENT_HOVER, LINE = "#2f6fe4", "#3b7cf0", "#1e3a70"
+    # 8-pt rhythm: 16 at the edges, 24 between sections, 8 inside a group.
+    # 30 px taller than before to make room for the connected strip without
+    # squeezing the code's quiet zone.
+    W, H, QR_PX = 760, 530, 256
     F = "Segoe UI"
 
     root = tk.Tk()
@@ -896,34 +956,95 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
               "Tk default (check the spec's `datas`)" % _icon)
     else:
         try:
-            root.iconbitmap(_icon)
+            # `default=`: applies to this window AND every toplevel this
+            # process opens later, instead of only the one in hand.
+            root.iconbitmap(default=_icon)
         except Exception as exc:            # cosmetic only, but say so
             print("window: iconbitmap failed (%s: %s)" % (type(exc).__name__, exc))
 
     tk.Label(root, text=APP_NAME, bg=NAVY, fg=FAINT,
-             font=(F, 9)).pack(pady=(14, 0))
+             font=(F, 9), anchor="w").pack(fill="x", padx=24, pady=(16, 0))
+
+    # ── connected strip ──
+    #
+    # One quiet line under the title, only while something is connected:
+    # "● P1  V-Pad · 192.168.1.134". The code view below keeps showing the
+    # NEXT phone's code, so a second player can join without the first one's
+    # status disappearing — the "is my phone connected?" question answered
+    # without hunting for the tray tooltip (owner brief 2026-08-20).
+    # Packed before `stack` so it keeps its place; hidden with pack_forget
+    # when the list empties, and the stack takes the room back.
+    # Outlined, not filled: a hairline on the window's own navy reads as a
+    # status line; a solid block would compete with the QR for attention.
+    strip = tk.Frame(root, bg=NAVY, padx=14, pady=7,
+                     highlightthickness=1, highlightbackground=LINE)
+    strip_items: list = []
+
+    def refresh_strip(peers) -> None:
+        for w in strip_items:
+            w.destroy()
+        strip_items.clear()
+        if not peers:
+            strip.pack_forget()
+            return
+        # Eyebrow: tracked capitals, the quietest element on the line.
+        eyebrow = tk.Label(strip, text="C O N N E C T E D", bg=NAVY, fg=FAINT,
+                           font=(F, 7, "bold"))
+        eyebrow.pack(side="left", padx=(0, 14))
+        strip_items.append(eyebrow)
+        # Identity only — slot and name. Four players have to share one
+        # quiet line, so the address stays in the tray tooltip and the log;
+        # long phone names are clipped rather than allowed to push P4 off
+        # the edge.
+        for slot, name, _ip in peers:
+            shown_name = name if len(name) <= 14 else name[:13] + "…"
+            cell = tk.Frame(strip, bg=NAVY)
+            tk.Label(cell, text="●", bg=NAVY, fg=OK,
+                     font=(F, 7)).pack(side="left", padx=(0, 6))
+            tk.Label(cell, text="P%d" % slot, bg=NAVY, fg=MUTED,
+                     font=(F, 9, "bold")).pack(side="left", padx=(0, 5))
+            tk.Label(cell, text=shown_name, bg=NAVY, fg=TEXT,
+                     font=(F, 9)).pack(side="left")
+            cell.pack(side="left", padx=(0, 16))
+            strip_items.append(cell)
+        # Same left edge as the headline and the code below.
+        strip.pack(fill="x", padx=24, pady=(14, 0), before=stack)
 
     stack = tk.Frame(root, bg=NAVY)
     stack.pack(fill="both", expand=True)
 
-    # ── code view ──
+    # ── code view: two columns ──
+    #
+    # Landscape, not portrait (owner, 2026-08-20): the old single column
+    # needed 720 px of height and still clipped its own footer once the
+    # connected strip arrived. Side by side, the code gets the left half at
+    # full size and every word of guidance sits beside it — nothing scrolls,
+    # nothing falls below the fold on a 768-px laptop.
     code = tk.Frame(stack, bg=NAVY)
-    head = tk.Label(code, text="Scan this code with V-Pad on your phone",
-                    bg=NAVY, fg=TEXT, font=(F, 13, "bold"))
-    head.pack(pady=(10, 4))
-    tk.Label(code, text="In the app: choose Wi-Fi, then Scan QR",
-             bg=NAVY, fg=MUTED, font=(F, 9)).pack(pady=(0, 16))
+    left = tk.Frame(code, bg=NAVY)
+    left.pack(side="left", padx=(24, 0), pady=(20, 0), anchor="n")
+    right = tk.Frame(code, bg=NAVY)
+    right.pack(side="left", fill="both", expand=True, padx=(28, 24),
+               pady=(20, 0), anchor="n")
 
     # White mat around the code: the quiet zone is part of the symbol, and
     # a QR flush against a dark background is measurably harder to read.
-    mat = tk.Frame(code, bg="white", padx=14, pady=14)
+    mat = tk.Frame(left, bg="white", padx=14, pady=14)
     mat.pack()
     canvas = tk.Label(mat, bg="white")
     canvas.pack()
+    addr = tk.Label(left, text="", bg=NAVY, fg=FAINT, font=(F, 8))
+    addr.pack(pady=(8, 0))
 
-    note = tk.Label(code, text="", bg=NAVY, fg=MUTED, font=(F, 9),
-                    justify="center")
-    note.pack(pady=(14, 0))
+    head = tk.Label(right, text="Scan this code with\nV-Pad on your phone",
+                    bg=NAVY, fg=TEXT, font=(F, 14, "bold"), justify="left",
+                    anchor="w")
+    head.pack(fill="x")
+    tk.Label(right, text="In the app: choose Wi-Fi, then Scan QR",
+             bg=NAVY, fg=MUTED, font=(F, 9), anchor="w").pack(fill="x", pady=(6, 0))
+    note = tk.Label(right, text="", bg=NAVY, fg=MUTED, font=(F, 9),
+                    justify="left", anchor="w", wraplength=330)
+    note.pack(fill="x", pady=(8, 0))
 
     # ── manual entry ──
     #
@@ -936,21 +1057,19 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
     #
     # Digits only, and read off a screen into a phone: no letters to
     # confuse (O/0, l/1), no keyboard layout to fight.
-    tk.Label(code, text="No camera? Type this code in the app instead:",
-             bg=NAVY, fg=TEXT, font=(F, 9, "bold")).pack(pady=(14, 6))
-    digits = tk.Label(code, text="", bg=PANEL, fg=TEXT,
-                      font=("Consolas", 21, "bold"), padx=20, pady=7)
-    digits.pack()
+    tk.Label(right, text="No camera? Type this code in the app instead:",
+             bg=NAVY, fg=TEXT, font=(F, 9, "bold"), anchor="w").pack(
+        fill="x", pady=(24, 8))
+    digits = tk.Label(right, text="", bg=PANEL, fg=TEXT,
+                      font=("Consolas", 22, "bold"), padx=22, pady=8)
+    digits.pack(anchor="w")
 
     # The ticket is single-use and the host mints the next one the moment a
     # phone enrols, so a second phone cannot reuse what the first one used —
     # and nothing on screen said so. A user with two phones would try the
     # same square twice and read the failure as a broken app.
-    tk.Label(code, text="Each phone needs its own code.",
-             bg=NAVY, fg=MUTED, font=(F, 9)).pack(pady=(12, 0))
-
-    addr = tk.Label(code, text="", bg=NAVY, fg=FAINT, font=(F, 8))
-    addr.pack(pady=(8, 0))
+    tk.Label(right, text="Each phone needs its own code.",
+             bg=NAVY, fg=MUTED, font=(F, 9), anchor="w").pack(fill="x", pady=(8, 0))
     code.pack(fill="both", expand=True)
 
     # ── connected view ──
@@ -983,16 +1102,45 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
     # Which peer the "connected" view has already announced. Without it,
     # pressing New code would bounce straight back to that view: the phone
     # is still connected, so the condition that opened it is still true.
-    announced: dict = {"peer": None}
+    # Seeded with whoever is ALREADY connected when the window opens: that
+    # phone is on the strip, and the code below is for the next one — only a
+    # fresh connection while the window is up earns the big tick.
+    announced: dict = {"peer": state.connected_to}
 
-    bar = tk.Frame(root, bg=NAVY)
-    bar.pack(pady=(0, 20))
+    # Footer: what closing does, then the actions. The reassurance is here
+    # because the button alone could not carry it — "Close" read as "stop
+    # the helper" to the first person who used it (owner, 2026-08-20) and
+    # they went looking for a way to start it again. Nothing stops: the
+    # engine lives in the tray, and a phone that is playing keeps playing.
+    #
+    # `side="bottom"` and `before=stack`: the footer claims its space
+    # before the code view does, so nothing can ever push the buttons off
+    # the window.
+    footer = tk.Frame(root, bg=NAVY)
+    footer.pack(side="bottom", fill="x", padx=24, pady=(0, 18), before=stack)
+    tk.Label(footer,
+             text="%s keeps running in the %s — your phone stays connected."
+                  % (APP_NAME, "system tray" if IS_WINDOWS else "menu bar"),
+             bg=NAVY, fg=FAINT, font=(F, 8), anchor="w").pack(
+        side="left", pady=(8, 0))
+    bar = tk.Frame(footer, bg=NAVY)
+    bar.pack(side="right")
 
-    def button(label, command):
+    def button(label, command, primary=False):
+        # One accent, one outline: the eye lands on "New code" first and
+        # "Close" stays available without shouting.
+        if primary:
+            return tk.Button(bar, text=label, command=command, width=13,
+                             relief="flat", bg=ACCENT, fg=TEXT,
+                             activebackground=ACCENT_HOVER, activeforeground=TEXT,
+                             borderwidth=0, cursor="hand2", pady=6,
+                             font=(F, 9, "bold"))
         return tk.Button(bar, text=label, command=command, width=13,
-                         relief="flat", bg=PANEL, fg=TEXT,
-                         activebackground="#1b3a78", activeforeground=TEXT,
-                         borderwidth=0, cursor="hand2", pady=5, font=(F, 9))
+                         relief="flat", bg=NAVY, fg=MUTED,
+                         activebackground=PANEL, activeforeground=TEXT,
+                         borderwidth=0, highlightthickness=1,
+                         highlightbackground=LINE, cursor="hand2", pady=6,
+                         font=(F, 9))
 
     def teardown() -> None:
         """Close the window WITHOUT tripping Tcl_AsyncDelete.
@@ -1030,7 +1178,7 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
         # için burada zaten güncel.
         raw = state.pairing_code or ""
         digits.config(text=f"{raw[:3]} {raw[3:]}" if len(raw) == 6 else raw)
-        note.config(text="Works once. After this your phone is remembered —\n"
+        note.config(text="Works once. After this your phone is remembered — "
                          "no code needed next time.")
 
     def show_code() -> None:
@@ -1047,8 +1195,10 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
             on_new_code()
         show_code()                         # the redraw follows the ticket
 
-    button("New code", new_code).pack(side="left", padx=6)
-    button("Close", teardown).pack(side="left", padx=6)
+    # "Done", not "Close": this window is a step in a task, and the only
+    # thing it closes is itself.
+    button("Done", teardown).pack(side="left", padx=(0, 8))
+    button("New code", new_code, primary=True).pack(side="left")
     # The X button must take the same path, or closing the window that way
     # becomes the one that crashes.
     root.protocol("WM_DELETE_WINDOW", teardown)
@@ -1062,8 +1212,14 @@ def _pairing_window(state: "HelperState", on_new_code) -> None:
     root.attributes("-topmost", True)
     root.after(1200, lambda: root.attributes("-topmost", False))
 
+    strip_shown: list = [None]
+
     def poll() -> None:
         nonlocal shown
+        peers = list(state.peers)
+        if peers != strip_shown[0]:
+            strip_shown[0] = peers
+            refresh_strip(peers)
         peer = state.connected_to
         if peer and peer != announced["peer"]:
             # The question the window exists to answer: stop showing a code
