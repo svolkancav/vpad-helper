@@ -52,6 +52,15 @@ VersionInfoDescription={#AppName} Setup
 ; more of the same. {autopf} resolves to {localappdata}\Programs here.
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#AppName}
+; Always offer the destination page. Inno's default is "auto", which hides
+; it whenever the same AppId is already registered — so the ONE time a
+; user is most likely to want a different folder (installed once, disliked
+; where it went, ran Setup again) is exactly when they could not choose.
+; Reproduced on a dev machine with 0.4.0 registered: no folder page at
+; all, no explanation. Showing it on an upgrade is harmless while the
+; folder stays the same (UsePreviousAppDir pre-fills it); what happens
+; when it CHANGES is handled in [Code] — see MoveOldInstall.
+DisableDirPage=no
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 ; Deliberately NOT versioned. The website and the README both link at
@@ -136,6 +145,104 @@ Type: filesandordirs; Name: "{localappdata}\{#AppName}"
 Type: filesandordirs; Name: "{localappdata}\VPad"
 
 [Code]
+const
+  RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+
+var
+  // Where the previous install lived, or '' on a fresh install. Read ONCE,
+  // before anything is written: Setup rewrites this very registry value
+  // with the new folder during the file-copy step (log: "Writing uninstall
+  // key values"), so reading it in ssPostInstall returns the NEW path and
+  // the move goes undetected. Measured, not assumed.
+  PrevAppDir: String;
+
+function InitializeSetup(): Boolean;
+var
+  dir: String;
+begin
+  // Same value Inno itself reads for UsePreviousAppDir. HKCU, not HKA:
+  // PrivilegesRequired=lowest with no override allowed means Setup never
+  // runs in administrative mode, so the key is always per-user.
+  // ExpandConstant turns the "{{" AppId escape into the single brace the
+  // registry key actually carries.
+  if not RegQueryStringValue(HKEY_CURRENT_USER,
+       ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1'),
+       'Inno Setup: App Path', dir) then
+    dir := '';
+  PrevAppDir := RemoveBackslashUnlessRoot(dir);
+  Result := True;
+end;
+
+function SameDir(const A, B: String): Boolean;
+begin
+  Result := CompareText(RemoveBackslashUnlessRoot(A),
+                        RemoveBackslashUnlessRoot(B)) = 0;
+end;
+
+function IsSubDirOf(const Child, Parent: String): Boolean;
+var
+  p: String;
+begin
+  // "Child is strictly inside Parent": C:\A\B is inside C:\A, C:\AB is not.
+  p := AddBackslash(RemoveBackslashUnlessRoot(Parent));
+  Result := (Length(Child) > Length(p)) and
+            (CompareText(Copy(Child, 1, Length(p)), p) = 0);
+end;
+
+procedure MoveOldInstall();
+var
+  old, newDir, newExe, run: String;
+begin
+  // Only reached when the user picked a different folder on an upgrade.
+  // Inno has already repointed the Add/Remove Programs entry at the new
+  // folder; the old one is now an orphan nothing will ever remove — and a
+  // dangerous orphan, because the tray's "Start with Windows" value (see
+  // vpad_helper.set_autostart) is written once, on toggle, as the absolute
+  // path of the .exe that was running. Left alone, Windows would start the
+  // OLD version at every logon; it would take the single-instance mutex,
+  // and the one the user actually installed would exit silently. So: fix
+  // the Run value, then remove the old tree. The helper was stopped in
+  // PrepareToInstall, so nothing in it is locked.
+  old := PrevAppDir;
+  newDir := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  if (old = '') or SameDir(old, newDir) then exit;
+  newExe := AddBackslash(newDir) + '{#AppName}.exe';
+
+  if RegQueryStringValue(HKEY_CURRENT_USER, RunKey, '{#AppName}', run) then
+  begin
+    Log('Autostart value pointed at ' + run + '; repointing at ' + newExe);
+    RegWriteStringValue(HKEY_CURRENT_USER, RunKey, '{#AppName}', '"' + newExe + '"');
+  end;
+
+  // A new folder INSIDE the old one cannot be cleaned up: removing the old
+  // tree would take the new install with it. Checked here rather than on
+  // the wizard page because a silent /DIR= install never shows the page.
+  // The stale copy is only disk residue once the Run value is fixed.
+  if IsSubDirOf(newDir, old) then
+  begin
+    Log('New folder is inside the previous one (' + old + '); leaving it');
+    exit;
+  end;
+
+  // Proof that the registry still describes a real install of OURS before
+  // deleting anything: the helper's own .exe must be there. Guards against
+  // a stale or hand-edited value pointing somewhere it should not.
+  if FileExists(AddBackslash(old) + '{#AppName}.exe') then
+  begin
+    Log('Removing previous install at ' + old);
+    if not DelTree(old, True, True, True) then
+      Log('Could not fully remove ' + old + ' - left for the user');
+  end
+  else
+    Log('Previous path ' + old + ' has no {#AppName}.exe; not touching it');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    MoveOldInstall();
+end;
+
 procedure StopHelper();
 var
   rc: Integer;
