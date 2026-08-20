@@ -1,4 +1,4 @@
-name: Windows helper (.exe)
+name: Helper builds (Windows .exe, macOS .app)
 
 # Builds the end-user "V-Pad Helper" tray app that iOS users install on
 # their PC. A Windows .exe cannot be produced from the macOS dev machine —
@@ -212,3 +212,54 @@ jobs:
 
             `V-Pad Helper.exe` is the same app without an installer, for anyone who
             prefers a single file to copy around.
+
+  # ── macOS ───────────────────────────────────────────────────────────
+  #
+  # Why this exists: the Mac build had no CI, and that is exactly how it
+  # fell a release behind — the published DMG still runs the pre-pairing
+  # daemon, so no 2.x phone can connect to it. The engine's macOS backend
+  # (keyboard + mouse via CGEvent; macOS gives third-party code no
+  # user-space virtual-HID path) is now part of the same engine as
+  # Windows, and this job proves it still packages.
+  #
+  # It does NOT publish. The public DMG is signed with the project's
+  # Developer ID certificate, which stays on the maintainer's Mac —
+  # `./make-dmg.sh dist/"V-Pad Helper.app" V-Pad-Helper.dmg` produces the
+  # signed disk image there. An unsigned DMG in a release would be worse
+  # than none: Gatekeeper would refuse it and the download would look broken.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Engine tests
+        working-directory: android-vpad-helper
+        run: python -m unittest discover -s host
+
+      - name: Build the .app
+        run: pyinstaller --noconfirm vpad-helper.spec
+
+      - name: Sanity-check the bundle
+        run: |
+          test -d "dist/V-Pad Helper.app" || { echo "no .app produced"; exit 1; }
+          # The tray app must not have been built as a bare console binary:
+          # a Mac user double-clicks a bundle, not an executable file.
+          test -f "dist/V-Pad Helper.app/Contents/Info.plist" || {
+            echo "bundle has no Info.plist"; exit 1; }
+          du -sh "dist/V-Pad Helper.app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpad-helper-macos-unsigned
+          path: dist/V-Pad Helper.app
+          if-no-files-found: error

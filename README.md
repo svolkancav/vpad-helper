@@ -81,19 +81,25 @@ and play. Keep the phone and the PC on the same Wi-Fi network.
 | OS | What you get |
 |---|---|
 | **Windows** | A real virtual Xbox 360 pad via ViGEmBus. Games see an ordinary XInput controller — no key mapping, triggers and sticks are analog. |
-| **macOS** | Keyboard + mouse. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission (System Settings → Privacy & Security → Accessibility) — without it macOS accepts the input and silently discards it. |
+| **macOS** | Keyboard + mouse, one player. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission (System Settings → Privacy & Security → Accessibility) — without it macOS accepts the input and silently discards it. |
 | **Linux** | Not implemented yet. The protocol is documented and `uinput` is the intended path. |
 
 ## Running from source
 
 ```bash
 pip install -r requirements.txt
-python3 vpad_daemon.py              # console engine, auto backend
-python3 vpad_daemon.py --inject log # decode frames, inject nothing
-python3 vpad_helper.py              # same engine + tray icon
+python3 vpad_helper.py              # tray icon + the pairing engine
+python3 vpad_helper.py --no-tray    # same engine, console only
 ```
 
-Useful flags: `--name` (the label the phone shows), `--inject vigem|macos|log`,
+The engine lives in `android-vpad-helper/host/vpad_host.py`: pairing
+tickets, a device ledger, up to four players, and one injector per
+platform. `vpad_daemon.py` is the older pairing-less engine, kept for
+reference — a phone running the 2.x app cannot connect to it.
+
+Useful flags: `--name` (the label the phone shows),
+`--inject auto|vigem|macos|log` (auto picks ViGEmBus on Windows and
+keyboard + mouse on macOS), `--players`,
 `--mouse-speed`, `--host-ip`, `--verbose`.
 
 ## Building the Windows release

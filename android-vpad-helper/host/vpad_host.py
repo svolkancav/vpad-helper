@@ -67,6 +67,10 @@ Sahadan öğrenilmiş şeyler; yeniden keşfetmek için sebep yok.
 from __future__ import annotations
 
 import argparse
+# `ctypes.util` yalnız macOS enjektörü için: CoreGraphics'i adıyla
+# bulup CGEvent çağrılarını oradan yapıyoruz (bkz. MacKbmInjector).
+import ctypes
+import ctypes.util
 import dataclasses
 import socket
 import struct
@@ -422,6 +426,15 @@ class Report:
     def pressed(self, mask: int, high: bool = False) -> bool:
         return bool((self.btn_high if high else self.btn_low) & mask)
 
+    def axis(self, value: int) -> float:
+        """İşaretsiz 0..255 (merkez 128) → -1.0..+1.0.
+
+        ViGEm arka ucu 16 bit'e ölçekliyor (`_axis16`); klavye/fare arka
+        ucunun ölçü birimi ise oran — ölü bölge ve fare hızı bununla
+        konuşuluyor. İkisi aynı teli okuyor, yalnız hedefleri farklı.
+        """
+        return max(-1.0, min(1.0, (value - 128) / 127.0))
+
     @classmethod
     def decode(cls, payload: bytes) -> "Report":
         if len(payload) != 8:
@@ -562,6 +575,227 @@ class VigemInjector(Injector):
             pass
 
 
+MAC_KEYS = {
+    "a": 0, "s": 1, "d": 2, "f": 3, "c": 8, "q": 12, "w": 13, "e": 14,
+    "r": 15, "m": 46, "return": 36, "tab": 48, "space": 49, "escape": 53,
+    "shift": 56, "control": 59,
+    "left": 123, "right": 124, "down": 125, "up": 126,
+}
+
+# CGEventType / tap constants.
+_KCG_HID_EVENT_TAP = 0
+_KCG_EVENT_LEFT_DOWN = 1
+_KCG_EVENT_LEFT_UP = 2
+_KCG_EVENT_RIGHT_DOWN = 3
+_KCG_EVENT_RIGHT_UP = 4
+_KCG_EVENT_MOUSE_MOVED = 5
+_KCG_EVENT_LEFT_DRAGGED = 6
+_KCG_EVENT_RIGHT_DRAGGED = 7
+_KCG_MOUSE_BUTTON_LEFT = 0
+_KCG_MOUSE_BUTTON_RIGHT = 1
+
+
+class _CGPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+def mac_keys_for(report: Report, stick_deadzone: float = 0.35) -> set[int]:
+    """Hangi macOS tuş kodları basılı olmalı — CoreGraphics'e ihtiyaç YOK.
+
+    Eşleme saf veri; sınıfın içinde kaldığında yalnız bir Mac'te test
+    edilebiliyordu ve bu projede macOS yolunu koşan bir CI yok. Dışarı
+    alınınca eşleme her platformda çivileniyor, sınıfa yalnız olayları
+    göndermek kalıyor.
+    """
+    keys: set[int] = set()
+
+    lx, ly = report.axis(report.lx), report.axis(report.ly)
+    if lx <= -stick_deadzone:
+        keys.add(MAC_KEYS["a"])
+    elif lx >= stick_deadzone:
+        keys.add(MAC_KEYS["d"])
+    # Telde Y aşağı doğru büyüyor: pozitif = çubuk aşağı = "S".
+    if ly <= -stick_deadzone:
+        keys.add(MAC_KEYS["w"])
+    elif ly >= stick_deadzone:
+        keys.add(MAC_KEYS["s"])
+
+    hat = HAT_VECTORS.get(report.hat)
+    if hat:
+        up, right, down, left = hat
+        if up:
+            keys.add(MAC_KEYS["up"])
+        if right:
+            keys.add(MAC_KEYS["right"])
+        if down:
+            keys.add(MAC_KEYS["down"])
+        if left:
+            keys.add(MAC_KEYS["left"])
+
+    for mask, key in (
+        (BTN_A, "space"), (BTN_B, "control"), (BTN_X, "e"), (BTN_Y, "r"),
+        (BTN_L1, "q"), (BTN_R1, "f"),
+        (BTN_SELECT, "tab"), (BTN_START, "return"),
+    ):
+        if report.pressed(mask):
+            keys.add(MAC_KEYS[key])
+    for mask, key in ((BTN_L3, "shift"), (BTN_R3, "c"), (BTN_HOME, "m")):
+        if report.pressed(mask, high=True):
+            keys.add(MAC_KEYS[key])
+    return keys
+
+
+class MacKbmInjector(Injector):
+    """macOS: gamepad → keyboard + mouse via CGEvent.
+
+    macOS offers third-party code no user-space virtual-HID path
+    (DriverKit needs an Apple-granted entitlement; the kext route needs
+    SIP disabled), so a real virtual pad is not achievable here. Mapping
+    onto keyboard + mouse is the honest alternative and is what most Mac
+    and browser games accept.
+
+    Events are posted at the HID tap, which requires **Accessibility**
+    permission for the hosting terminal. Without it CGEventPost silently
+    does nothing — hence the explicit warning in the startup banner.
+    """
+
+    name = "macOS keyboard + mouse (CGEvent)"
+    tag = "cgevent"
+
+    # TEK OYUNCU. Klavye ve fare makinenin tamamına ait: iki telefon
+    # aynı anda enjekte ederse tek imleci çekiştirir ve tuşlar
+    # birbirinin üstüne biner. `PadSet` bu yüzden yalnız 1. slota
+    # gerçek enjektör veriyor, kalanlar günlüğe düşüyor.
+
+    # Analog thresholds. The left stick has to cross a wide deadzone
+    # before it latches a WASD key (a digital key can't express 30 %
+    # deflection), while the mouse only needs to clear sensor noise.
+    STICK_DEADZONE = 0.35
+    MOUSE_DEADZONE = 0.10
+    TRIGGER_THRESHOLD = 64
+
+    def __init__(self, mouse_speed: float = 6.0):
+        cg_path = (ctypes.util.find_library("CoreGraphics")
+                   or ctypes.util.find_library("ApplicationServices"))
+        cf_path = ctypes.util.find_library("CoreFoundation")
+        if not cg_path or not cf_path:
+            raise RuntimeError("CoreGraphics / CoreFoundation not found")
+
+        self._cg = ctypes.cdll.LoadLibrary(cg_path)
+        self._cf = ctypes.cdll.LoadLibrary(cf_path)
+        self._mouse_speed = mouse_speed
+
+        cg, cf = self._cg, self._cf
+        cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+        cg.CGEventCreateKeyboardEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+        cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+        cg.CGEventCreateMouseEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, _CGPoint, ctypes.c_uint32]
+        cg.CGEventCreate.restype = ctypes.c_void_p
+        cg.CGEventCreate.argtypes = [ctypes.c_void_p]
+        cg.CGEventGetLocation.restype = _CGPoint
+        cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+        cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        cg.CGDisplayPixelsWide.restype = ctypes.c_size_t
+        cg.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+        cg.CGDisplayPixelsHigh.restype = ctypes.c_size_t
+        cg.CGDisplayPixelsHigh.argtypes = [ctypes.c_uint32]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+        display = cg.CGMainDisplayID()
+        self._screen_w = float(cg.CGDisplayPixelsWide(display))
+        self._screen_h = float(cg.CGDisplayPixelsHigh(display))
+
+        self._down_keys: set[int] = set()
+        self._left_down = False
+        self._right_down = False
+
+    # -- event helpers ------------------------------------------------
+
+    def _post_key(self, keycode: int, down: bool) -> None:
+        event = self._cg.CGEventCreateKeyboardEvent(None, keycode, down)
+        if not event:
+            return
+        self._cg.CGEventPost(_KCG_HID_EVENT_TAP, event)
+        self._cf.CFRelease(event)
+
+    def _cursor(self) -> _CGPoint:
+        probe = self._cg.CGEventCreate(None)
+        if not probe:
+            return _CGPoint(0.0, 0.0)
+        point = self._cg.CGEventGetLocation(probe)
+        self._cf.CFRelease(probe)
+        return point
+
+    def _post_mouse(self, event_type: int, point: _CGPoint, button: int) -> None:
+        event = self._cg.CGEventCreateMouseEvent(
+            None, event_type, point, button)
+        if not event:
+            return
+        self._cg.CGEventPost(_KCG_HID_EVENT_TAP, event)
+        self._cf.CFRelease(event)
+
+    # -- state diffing ------------------------------------------------
+
+    def _sync_keys(self, wanted: set[int]) -> None:
+        for keycode in wanted - self._down_keys:
+            self._post_key(keycode, True)
+        for keycode in self._down_keys - wanted:
+            self._post_key(keycode, False)
+        self._down_keys = wanted
+
+    def _sync_mouse_buttons(self, left: bool, right: bool) -> None:
+        if left != self._left_down:
+            self._post_mouse(
+                _KCG_EVENT_LEFT_DOWN if left else _KCG_EVENT_LEFT_UP,
+                self._cursor(), _KCG_MOUSE_BUTTON_LEFT)
+            self._left_down = left
+        if right != self._right_down:
+            self._post_mouse(
+                _KCG_EVENT_RIGHT_DOWN if right else _KCG_EVENT_RIGHT_UP,
+                self._cursor(), _KCG_MOUSE_BUTTON_RIGHT)
+            self._right_down = right
+
+    def _move_mouse(self, dx: float, dy: float) -> None:
+        if dx == 0.0 and dy == 0.0:
+            return
+        point = self._cursor()
+        target = _CGPoint(
+            max(0.0, min(self._screen_w - 1.0, point.x + dx)),
+            max(0.0, min(self._screen_h - 1.0, point.y + dy)))
+        # While a button is held the OS expects *Dragged, not Moved —
+        # otherwise drag gestures (and aim-while-firing) break.
+        if self._left_down:
+            event_type, button = _KCG_EVENT_LEFT_DRAGGED, _KCG_MOUSE_BUTTON_LEFT
+        elif self._right_down:
+            event_type, button = (_KCG_EVENT_RIGHT_DRAGGED,
+                                  _KCG_MOUSE_BUTTON_RIGHT)
+        else:
+            event_type, button = _KCG_EVENT_MOUSE_MOVED, _KCG_MOUSE_BUTTON_LEFT
+        self._post_mouse(event_type, target, button)
+
+    # -- Injector API -------------------------------------------------
+
+    def apply(self, report: Report) -> None:
+        self._sync_keys(mac_keys_for(report, self.STICK_DEADZONE))
+        self._sync_mouse_buttons(
+            left=report.rt >= self.TRIGGER_THRESHOLD,
+            right=report.lt >= self.TRIGGER_THRESHOLD)
+
+        rx, ry = report.axis(report.rx), report.axis(report.ry)
+        dx = rx * self._mouse_speed if abs(rx) > self.MOUSE_DEADZONE else 0.0
+        # No Y flip: CGEvent screen coordinates also grow downward, and
+        # the wire is already +y = down.
+        dy = ry * self._mouse_speed if abs(ry) > self.MOUSE_DEADZONE else 0.0
+        self._move_mouse(dx, dy)
+
+    def reset(self) -> None:
+        self._sync_keys(set())
+        self._sync_mouse_buttons(left=False, right=False)
+
+
 class PadSet:
     """Slot başına bir enjektör; **ilk ihtiyaçta** yaratılır.
 
@@ -593,6 +827,22 @@ class PadSet:
             return injector
 
     def _build(self, slot: int) -> Injector:
+        if self._backend == "cgevent":
+            # Klavye + fare makinenin tamamına ait; ikinci bir telefonun
+            # aynı imleci çekiştirmesi oyunu oynanmaz yapardı. P1 enjekte
+            # eder, diğerleri bağlanır ama yalnız günlüğe yazar.
+            if slot != 0:
+                log(f"⚠ P{slot + 1} macOS'ta enjekte etmiyor — klavye/fare "
+                    f"tek oyuncuya ait, oturum günlükle sürüyor")
+                return LogInjector(self._verbose, slot)
+            try:
+                injector = MacKbmInjector()
+                log(f"⊕ P{slot + 1} klavye + fare (CGEvent)")
+                return injector
+            except Exception as exc:
+                log(f"⚠ P{slot + 1} CGEvent enjektörü kurulamadı ({exc}) — "
+                    f"günlüğe düşüldü")
+                return LogInjector(self._verbose, slot)
         if self._backend != "vigem":
             return LogInjector(self._verbose, slot)
         try:
@@ -620,7 +870,23 @@ def resolve_backend(preference: str) -> str:
     """`--inject` seçimini somut arka uca indirger, sesli şekilde düşerek."""
     choice = preference
     if choice == "auto":
-        choice = "vigem" if sys.platform == "win32" else "log"
+        if sys.platform == "win32":
+            choice = "vigem"
+        elif sys.platform == "darwin":
+            choice = "macos"
+        else:
+            choice = "log"
+
+    if choice == "macos":
+        # Erişilebilirlik izni YOKSA CGEventPost sessizce hiçbir şey
+        # yapmıyor. Burada engellemiyoruz — tepsi uygulaması izni istiyor
+        # ve kullanıcı verdiği anda enjeksiyon çalışmaya başlıyor; sıkı
+        # davranmak, izni sonradan veren kullanıcıyı yeniden başlatmaya
+        # zorlardı.
+        if sys.platform != "darwin":
+            log_raw("!! --inject macos yalnız macOS'ta çalışır — günlüğe düşüldü.")
+            return "log"
+        return "cgevent"
 
     if choice != "vigem":
         return "log"
@@ -1115,7 +1381,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="uygulamada görünecek mDNS adı "
                              "(varsayılan 'V-Pad host — <hostname>')")
     parser.add_argument("--inject", default="auto",
-                        choices=["auto", "vigem", "log"],
+                        choices=["auto", "vigem", "macos", "log"],
                         help="enjeksiyon arka ucu (varsayılan auto)")
     parser.add_argument("--host-ip", default=None,
                         help="mDNS'te yalnız bu IPv4 adresini yayınla "
