@@ -261,9 +261,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Sürüm Windows işiyle AYNI sabitte: iki platform tek araç
-          # zincirinde kalsın. Gerekçe için oradaki uzun nota bak.
-          pip install -r requirements.txt "pyinstaller==6.21.0"
+          # ⚠️ BURADA SABİTLEME YOK ve bu bilinçli. Windows işi PyInstaller'ı
+          # 6.21.0'a sabitliyor (gerekçe: antivirüs itibarı, oradaki uzun
+          # nota bak) ve "iki platform tek araç zincirinde kalsın" diye aynı
+          # sabit buraya da konmuştu — Mac build'ini KIRDI: 6.21.0 .app
+          # bundle'ı üretmiyor, "no .app produced" ile düşüyor (ölçüldü,
+          # 2026-08-21 koşusu 32503890774). macOS'ta antivirüs itibarı diye
+          # bir sorunumuz yok, dolayısıyla sabitlemenin bu tarafta getirisi
+          # sıfır, bedeli build. Sabitlemeyi buraya geri getirme.
+          pip install -r requirements.txt pyinstaller
 
       - name: Engine tests
         working-directory: android-vpad-helper
