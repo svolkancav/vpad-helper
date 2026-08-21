@@ -773,13 +773,24 @@ def handle_client(client: socket.socket, addr, injector: Injector,
     except Exception as exc:
         print(f"[{ts()}] ✗ handler error: {exc!r}")
     finally:
-        # Always neutralize: a phone that drops mid-press must not leave a
-        # key held down or a trigger latched on the host.
-        try:
-            injector.reset()
-        except Exception:
-            pass
+        # Neutralize ONLY if this connection actually held the session.
+        #
+        # The injector is one object shared by every connection thread, so
+        # an unconditional reset here reached across into somebody else's
+        # game: a second phone getting REJECT(in_use), a port scanner, a
+        # browser tab opened on the wrong port — any of them ran this line
+        # and released the buttons of whoever was actually playing.
+        # Measured on a real ViGEmBus pad, read back through XInput:
+        # A held = 0x1000, then a refused connection → 0x0000.
+        #
+        # Order matters: neutralize, THEN release. The other way round lets
+        # the next phone in while the previous phone's last state is still
+        # latched on the pad.
         if holding_lock:
+            try:
+                injector.reset()
+            except Exception:
+                pass
             _active_peer = None
             _active_lock.release()
         print(f"[{ts()}] ◈ session: {stats.reports} reports, {stats.pings} "
@@ -865,9 +876,40 @@ def lan_addresses(override: str | None = None) -> list[str]:
     return ordered or [default_route_ip()]
 
 
+# Cooperative shutdown, for the case where main() is NOT the main thread.
+#
+# `vpad_helper.py` runs this engine in a daemon thread. Python's docs are
+# blunt about what that means at exit — "Daemon threads are abruptly
+# stopped at shutdown. Their resources (such as open files, database
+# transactions, etc.) may not be released properly." — and the Bonjour
+# unregister below lives in exactly such a `finally`. Quitting from the
+# tray therefore skipped the mDNS goodbye packet, and a phone that had
+# already cached the record kept offering this computer long after the
+# helper was gone (RFC 6762 §10 recommends a 75-minute TTL for these
+# records; §10.1's goodbye would have dropped it in one second).
+#
+# So the tray asks the engine to unwind instead of pulling the process out
+# from under it. Closing the listening socket is what breaks `accept()`.
+_shutdown = threading.Event()
+_listener: socket.socket | None = None
+
+
+def request_shutdown() -> None:
+    """Ask a running `main()` to return. Safe to call from any thread."""
+    _shutdown.set()
+    sock = _listener
+    if sock is not None:
+        try:
+            sock.close()      # makes the blocking accept() raise at once
+        except OSError:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. `argv` is explicit so `vpad_helper.py` can drive the
     same engine in a thread instead of shelling out to a second process."""
+    global _listener
+    _shutdown.clear()
     parser = argparse.ArgumentParser(
         description="V-Pad companion daemon (reference implementation).",
         epilog="Wire protocol: docs/companion-daemon.md",
@@ -906,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     server.listen(4)
     port = server.getsockname()[1]
+    _listener = server
 
     addresses = lan_addresses(args.host_ip)
     os_tag = {"win32": "win", "darwin": "mac",
@@ -956,8 +999,15 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     try:
-        while True:
-            client, addr = server.accept()
+        while not _shutdown.is_set():
+            try:
+                client, addr = server.accept()
+            except OSError:
+                # request_shutdown() closed the socket under us. Any other
+                # OSError is a genuine listener failure and must surface.
+                if _shutdown.is_set():
+                    break
+                raise
             # Thread per connection so a 2nd phone can be REJECTed
             # immediately instead of queueing behind the live session.
             threading.Thread(
@@ -966,8 +1016,9 @@ def main(argv: list[str] | None = None) -> int:
                 daemon=True,
             ).start()
     except KeyboardInterrupt:
-        print(f"\n[{ts()}] ▣ shutting down")
+        pass
     finally:
+        print(f"\n[{ts()}] ▣ shutting down")
         try:
             injector.close()
         except Exception:
@@ -981,6 +1032,8 @@ def main(argv: list[str] | None = None) -> int:
             server.close()
         except OSError:
             pass
+        _listener = None
+        print(f"[{ts()}] ▣ stopped — Bonjour record withdrawn")
     return 0
 
 

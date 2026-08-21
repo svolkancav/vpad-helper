@@ -1,0 +1,16 @@
+# PyInstaller. `build/` also holds version_info.txt, which vpad-helper.spec
+# generates from vpad_helper.py's __version__ — it is output, not source.
+build/
+build-onedir/
+dist/
+dist-onefile/
+dist-onedir/
+dist-installer/
+
+# Inno Setup
+*.iss.bak
+
+__pycache__/
+*.py[cod]
+
+.DS_Store

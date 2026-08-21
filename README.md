@@ -6,7 +6,7 @@
 The free companion app that lets **V-Pad: Virtual Gamepad** on your iPhone act as a
 gamepad for your computer.
 
-**[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.exe)** — one file, no installer, lives in the system tray.
+**[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad-Helper-Setup.exe)** — a normal installer: no administrator rights, and an entry in Add/Remove Programs when you want it gone. The app itself lives in the system tray. A [single-file build](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.exe) is published too, for anyone who prefers nothing installed.
 
 **[⬇ Download for macOS](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad-Helper.dmg)** — signed and notarised by Apple, so it opens without a Gatekeeper detour. Open the disk image and **drag the app into Applications**, then launch it from there; it lives in the menu bar.
 
@@ -32,20 +32,37 @@ this category ships a desktop component.
 
 ## Install
 
-1. Download the `.exe` above and run it. **No window opens** — this is a tray app: it
-   installs nothing and just sits next to your clock. On Windows 11 new tray icons
-   start out hidden, so click the **^** arrow to find it (Settings → Personalization →
-   Taskbar → *Other system tray icons* keeps it visible). A notification on first run
-   tells you it is up.
-2. **Windows will warn you** ("Windows protected your PC") because the file is not
-   code-signed yet: *More info → Run anyway*.
+1. Run `V-Pad-Helper-Setup.exe`. It installs for your user only, so it does **not**
+   ask for administrator rights, and it leaves an uninstaller behind. When it
+   finishes, the app starts — but **no window opens**: this is a tray app, it just
+   sits next to your clock. On Windows 11 new tray icons start out hidden, so click
+   the **^** arrow to find it (Settings → Personalization → Taskbar → *Other system
+   tray icons* keeps it visible). A notification on first run tells you it is up.
+2. **The app is not code-signed yet**, so Windows may warn that the publisher is
+   unknown, and a machine-learning antivirus scanner may object. Earlier releases were
+   flagged as `Trojan:Win32/Wacatac.C!ml` — a **false positive** that
+   PyInstaller-packaged Python apps are well known for. Every engine that flagged it
+   was heuristic; no signature-based scanner did.
+
+   Two things were changed at the source rather than asking users to live with it: the
+   build now compiles its own PyInstaller bootloader (the prebuilt one, shared with
+   thousands of real samples, is what the scanners matched on), and the app ships
+   installed instead of unpacking itself into `%TEMP%` on every launch. A
+   false-positive report is filed with Microsoft, and code signing is next.
+
+   If your scanner still removes the download, restore it: **Windows Security → Virus &
+   threat protection → Protection history →** find the V-Pad Helper entry **→ Actions →
+   Allow on device**, then download again. On other antivirus products the equivalent is
+   "restore from quarantine" plus an exclusion. Or skip the binary altogether — the
+   whole thing is open source, so [read it](https://github.com/svolkancav/vpad-helper)
+   and [run it from source](#running-from-source).
 3. Windows then asks whether the app may use the network. **Allow it on private
    networks** — without that the phone can see your computer but cannot connect.
-4. **On first run it offers the gamepad driver** and asks for permission. Accept it.
-   That is [ViGEmBus](https://github.com/nefarius/ViGEmBus), what makes games see a
-   genuine Xbox 360 controller; the installer is bundled, nothing extra to download.
-   Skip it and games will see no controller — the tray menu can still install it
-   later.
+4. **On first run it offers the gamepad driver** and asks for permission. *This* one
+   does need administrator rights, because it installs a driver. Accept it. That is
+   [ViGEmBus](https://github.com/nefarius/ViGEmBus), what makes games see a genuine
+   Xbox 360 controller; the installer is bundled, nothing extra to download. Skip it
+   and games will see no controller — the tray menu can still install it later.
 
 Then on the iPhone: open V-Pad → **Connection** → tap your computer → open any layout
 and play. Keep the phone and the PC on the same Wi-Fi network.
@@ -64,20 +81,48 @@ and play. Keep the phone and the PC on the same Wi-Fi network.
 | OS | What you get |
 |---|---|
 | **Windows** | A real virtual Xbox 360 pad via ViGEmBus. Games see an ordinary XInput controller — no key mapping, triggers and sticks are analog. |
-| **macOS** | Keyboard + mouse. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission (System Settings → Privacy & Security → Accessibility) — without it macOS accepts the input and silently discards it. |
+| **macOS** | Keyboard + mouse, one player. macOS offers third-party code no user-space virtual-HID path (DriverKit needs an Apple-granted entitlement, the kext route needs SIP disabled), so the pad is mapped onto keys: left stick = WASD, D-pad = arrows, right stick = mouse, RT/LT = left/right click, A/B/X/Y = Space/Ctrl/E/R, L1/R1 = Q/F, L3/R3 = Shift/C, Select/Start = Tab/Return. Needs Accessibility permission (System Settings → Privacy & Security → Accessibility) — without it macOS accepts the input and silently discards it. |
 | **Linux** | Not implemented yet. The protocol is documented and `uinput` is the intended path. |
 
 ## Running from source
 
 ```bash
 pip install -r requirements.txt
-python3 vpad_daemon.py              # console engine, auto backend
-python3 vpad_daemon.py --inject log # decode frames, inject nothing
-python3 vpad_helper.py              # same engine + tray icon
+python3 vpad_helper.py              # tray icon + the pairing engine
+python3 vpad_helper.py --no-tray    # same engine, console only
 ```
 
-Useful flags: `--name` (the label the phone shows), `--inject vigem|macos|log`,
+The engine lives in `android-vpad-helper/host/vpad_host.py`: pairing
+tickets, a device ledger, up to four players, and one injector per
+platform. `vpad_daemon.py` is the older pairing-less engine, kept for
+reference — a phone running the 2.x app cannot connect to it.
+
+Useful flags: `--name` (the label the phone shows),
+`--inject auto|vigem|macos|log` (auto picks ViGEmBus on Windows and
+keyboard + mouse on macOS), `--players`,
 `--mouse-speed`, `--host-ip`, `--verbose`.
+
+## Building the Windows release
+
+CI does all of this on every push (`.github/workflows/build.yml`); these are the
+same commands, for a Windows box.
+
+```powershell
+pip install -r requirements.txt pyinstaller
+
+pyinstaller --noconfirm vpad-helper.spec                       # single-file .exe
+$env:VPAD_ONEDIR=1
+pyinstaller --noconfirm --distpath dist-onedir `
+            --workpath build-onedir vpad-helper.spec           # installer payload
+iscc /DAppVersion=0.2.2 installer.iss                          # -> dist-installer\
+```
+
+The version lives in exactly one place, `__version__` in `vpad_helper.py`; the
+spec reads it into the .exe's version resource and CI refuses to build a `v*` tag
+that disagrees with it. `vpad-helper.ico` is committed, and `make-icon.py`
+regenerates it from `brand/icongamepad.png` if the artwork changes.
+
+Signing is optional and off by default — see `sign-windows.ps1`.
 
 ## Troubleshooting
 

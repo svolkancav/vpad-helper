@@ -11,6 +11,11 @@ zeroconf>=0.132
 pystray>=0.19
 pillow>=10.0
 
+# QR generation. The tray renders the pairing ticket into a PNG and opens
+# it — the app has no window, so this is the only channel through which a
+# code reaches the person holding the phone. Pure Python, no C extension.
+qrcode>=7.4
+
 # Windows only: real virtual Xbox 360 pad through ViGEmBus. The wheel also
 # carries the ViGEmBus installer, which the .spec copies into the bundle so
 # a fresh user can install the driver from the tray menu instead of hunting

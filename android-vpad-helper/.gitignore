@@ -1,0 +1,14 @@
+# Gradle çıktıları — jvm-verify yalnızca doğrulama projesi, çıktısı teslimat değil
+jvm-verify/build/
+jvm-verify/.gradle/
+jvm-verify/gradle.properties
+
+# IDE'nin (Eclipse/Buildship) ürettiği kaynak kopyaları. Gradle build'i
+# ../android/core'u DOĞRUDAN gösteriyor, bunlar kullanılmıyor — ama commit
+# edilirlerse "tek kopya, sürüklenme imkânsız" güvencesi delinir: bugünkü
+# hâlleri eski tip baytlarını (0x20/0x21) taşıyor.
+jvm-verify/bin/
+
+# Python
+__pycache__/
+*.pyc
