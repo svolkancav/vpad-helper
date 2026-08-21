@@ -71,30 +71,51 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install PyInstaller with a locally compiled bootloader
-        # `--no-binary` KASITLI ve bu satırın tek sebebi antivirüs.
+      - name: Install PyInstaller (SABİT sürüm, HAZIR bootloader)
+        # ⚠️ Bu satır 2026-08-21'de TERSİNE ÇEVRİLDİ. Öncesinde
+        # `--no-binary pyinstaller` vardı ve gerekçesi şuydu: "hazır
+        # bootloader binlerce zararlıyla bayt bayt ortak, kaynaktan
+        # derleyince eşleşme kırılır." O gerekçe YANLIŞ çıktı.
         #
-        # Hazır wheel, önceden derlenmiş bir bootloader taşıyor. O ikili,
-        # PyInstaller kullanan BİNLERCE gerçek zararlıyla bayt bayt ortak —
-        # ve ML tabanlı motorlar tam olarak ona kilitleniyor. Sonuç, yayındaki
-        # 0.2.1 exe'sinde ölçüldü (2026-08-15):
+        # ÖLÇÜM (bu makinenin Defender tehdit geçmişi, koruma AÇIK):
         #
-        #     Microsoft Defender  Trojan:Win32/Wacatac.C!ml  (severity 5)
-        #     + Elastic, SentinelOne, Bkav, SecureAge, Arctic Wolf
+        #     15.08  Trojan:Win32/Wacatac.C!ml
+        #     20.08  Program:Win32/Wacapew.A!ml
+        #     21.08  Trojan:Win32/Sabsik.FL.A!ml
         #
-        # Hepsi sezgisel/ML; imza tabanlı hiçbir motor işaretlemedi. Defender
-        # dosyayı indirir indirmez SİLİYOR, yani kullanıcı "Yine de çalıştır"
-        # ekranına bile ulaşamıyor — kurulum tamamen imkânsız.
+        # Bootloader'ı kaynaktan derlediğimiz hâlde işaretlenmeye devam etti,
+        # ve VERDICT AİLESİ HER SEFERİNDE DEĞİŞTİ. Zararlıyla paylaşılan bir
+        # bayt deseni olsaydı verdict SABİT kalırdı; üç ayrı ML ailesi
+        # "bu dosyayı hiç görmedim, itibarı yok" demektir. Sorun desen
+        # değil, İTİBAR.
         #
-        # Kaynaktan kurmak bootloader'ı bu runner'da MSVC ile derliyor;
-        # baytlar değişince eşleşme kırılıyor. `windows-latest` üzerinde
-        # derleyici hazır, ek kurulum gerekmiyor.
+        # PyInstaller ekibinin kendi metni de bunu söylüyor
+        # (.github/ISSUE_TEMPLATE/antivirus.md):
+        #   "Bir sürümün daha az yanlış pozitif alması o sürümün doğru bir şey
+        #    yaptığını göstermez — sadece FARKLIDIR, farklı checksum'ı vardır
+        #    ve baştan ezberlenmesi gerekir."
+        # ve yeniden derlemeyi açıkça "iki ucu keskin bıçak" diye niteliyor:
+        # seni farklı yapar, ama PyInstaller beyaz listeye alınırsa senin
+        # yapın ondan faydalanamaz. Bir maintainer mekanizmayı da veriyor:
+        # Defender bootloader'ları EZBERLİYOR ve kullanıcılar yanlış pozitif
+        # bildirdikçe beyaz listeye ekliyor.
         #
-        # Bu TEK BAŞINA yetmeyebilir: onefile + `console=False` da sezgisel
-        # puanı yükseltiyor. Sıradaki kaldıraçlar, sırayla: Microsoft'a
-        # yanlış-pozitif bildirimi (en hızlısı), kod imzalama, ve gerekirse
-        # onefile yerine onedir + zip.
-        run: pip install --no-binary pyinstaller pyinstaller
+        # Yani her CI koşusunda yeni bir bootloader üretmek, her sürümün
+        # SIFIR itibarla doğması demekti — ölçülen aile savrulması tam olarak
+        # bu. Artık HAZIR wheel kullanıyoruz ve sürümü SABİTLİYORUZ ki
+        # bootloader baytları sürümler arası AYNI kalsın ve itibar biriksin.
+        #
+        # Sürüm seçimi: 6.22.x hattı bu commit'te dört günlük (6.22.2 →
+        # 2026-08-17) ve "en yeni sürüm işaretlenir" tam olarak o durum.
+        # 6.21.0 (2026-06-13) bootloader'ı beyaz listeye girecek kadar eski,
+        # hâlâ desteklenecek kadar yeni. İşaretlenme sürerse bir sonraki
+        # deneme 6.20.0'dır — ama sürümü SIK DEĞİŞTİRME, her değişiklik
+        # itibarı sıfırlar.
+        #
+        # Sıradaki kaldıraçlar: Microsoft'a yanlış-pozitif bildirimi
+        # (microsoft.com/en-us/wdsi/filesubmission — Setup ve çıplak exe AYRI
+        # verdict alıyor, ikisi ayrı gönderilmeli) ve kod imzalama.
+        run: pip install "pyinstaller==6.21.0"
 
       - name: Resolve the version
         # vpad_helper.py's __version__ is the single source of truth. On a
@@ -240,7 +261,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          # Sürüm Windows işiyle AYNI sabitte: iki platform tek araç
+          # zincirinde kalsın. Gerekçe için oradaki uzun nota bak.
+          pip install -r requirements.txt "pyinstaller==6.21.0"
 
       - name: Engine tests
         working-directory: android-vpad-helper
