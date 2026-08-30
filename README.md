@@ -13,6 +13,8 @@ This is the file <https://vpadcontroller.com> links to.
 2. Download **[vpad-host.exe](./vpad-host.exe?raw=true)**, double-click it,
    and look for the V-Pad icon in the notification area (bottom-right corner).
 
+No console window appears — the host lives in the notification area.
+
 Windows will warn that the file is unsigned the first time —
 choose **More info → Run anyway**.
 
@@ -22,5 +24,5 @@ redistributes; the exe prints the same text with `vpad-host --licenses`.
 sha256 of the current build:
 
 ```
-27e5aaaab48e53465b48e84ceda8f1e620e3cc4f8bc8c4fe960061d108131262  vpad-host.exe
+d98019395da9f6deab5540c267e76d83174f57d76a67bbd5d7a1f5b062eebaa5  vpad-host.exe
 ```
