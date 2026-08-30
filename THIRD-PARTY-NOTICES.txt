@@ -1,4 +1,4 @@
-﻿v-pad helper — third-party notices
+v-pad helper — third-party notices
 
 this program ships as a single self-contained file. the assemblies
 listed below are redistributed inside it, each under its own licence.
