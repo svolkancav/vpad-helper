@@ -1,0 +1,119 @@
+﻿v-pad helper — third-party notices
+
+this program ships as a single self-contained file. the assemblies
+listed below are redistributed inside it, each under its own licence.
+the licence texts are reproduced in full because that is what they ask
+for; everything else here is written by us.
+
+── the gamepad driver ──────────────────────────────────────────────
+
+this executable does not contain a driver, and neither does its
+installer. the virtual gamepad is created by vigembus, a kernel driver
+by nefarius software solutions e.u., which you install yourself from
+the vendor's own release — the tray menu links straight to it.
+
+we deliberately do not carry, repackage, or re-sign that installer.
+it reaches you exactly as its authors published it, with its
+original signature intact, which is the only way a kernel driver
+can be trusted to load.
+
+clause 2 of the bsd 3-clause licence binds anyone redistributing in
+binary form. we no longer redistribute vigembus, so the text below is
+reproduced as a credit rather than as a condition — the driver's own
+installer carries its licence to you.
+
+this program is not endorsed by or affiliated with nefarius software
+solutions e.u., and no trademark of theirs is claimed here.
+
+── redistributed assemblies ────────────────────────────────────────
+
+nefarius.vigem.client 1.21.256 — mit licence
+  copyright © nefarius software solutions e.u. 2017-2023
+  benjamin höglinger-stelzer
+  https://github.com/ViGEm/ViGEm.NET
+
+qrcoder 1.8.0 — mit licence
+  copyright © 2013-2025 raffael herrmann
+  copyright © 2024-2025 shane krueger
+  https://github.com/Shane32/QRCoder
+
+makaretu.dns.multicast.new 0.38.0 — mit licence
+  copyright © 2018-2019 richard schneider, jdomnitz
+  https://github.com/jdomnitz/net-mdns
+
+makaretu.dns.new — mit licence
+  copyright © 2018-2019 richard schneider, 2023+ additions jdomnitz
+  https://github.com/jdomnitz/net-dns
+
+common.logging 3.4.1 and common.logging.core
+  authors: aleksandar seovic, mark pollack, erich eichinger,
+  stephen bohlen
+  https://net-commons.github.io/common-logging/
+
+  ⚠ the nuget package for this library carries no licence field and no
+  licence file, so no licence is asserted here on its behalf. it is a
+  transitive dependency, pulled in by the mdns advertiser rather than
+  chosen by us. the licence must be confirmed at the project page above
+  before this program is distributed publicly.
+
+── bsd 3-clause licence (vigembus) ─────────────────────────────────
+
+Copyright (c) 2016-2020, Nefarius Software Solutions e.U.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+── mit licence ─────────────────────────────────────────────────────
+
+the four assemblies marked "mit licence" above are covered by the
+following terms, with the copyright holders named beside each:
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+── the .net runtime ────────────────────────────────────────────────
+
+this file also contains the .net runtime and base class libraries,
+© microsoft corporation, under the mit licence.
+https://github.com/dotnet/runtime
