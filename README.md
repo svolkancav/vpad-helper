@@ -24,5 +24,5 @@ redistributes; the exe prints the same text with `vpad-host --licenses`.
 sha256 of the current build:
 
 ```
-bcaa33bf1c5321d7923ddf9861443c3077035dfca26559cff0bea6deca955bb1  vpad-host.exe
+37645def11d32f5768bda424ee63a271f5938af1e7edf68ad91db9071003191d  vpad-host.exe
 ```
