@@ -1,14 +1,14 @@
 # V-Pad Helper
 
-[![Build](https://github.com/svolkancav/vpad-helper/actions/workflows/build.yml/badge.svg)](https://github.com/svolkancav/vpad-helper/actions/workflows/build.yml) [![Release](https://img.shields.io/github/v/release/svolkancav/vpad-helper)](https://github.com/svolkancav/vpad-helper/releases/latest) [![License: MIT](https://img.shields.io/github/license/svolkancav/vpad-helper)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/svolkancav/vpad-helper)](https://github.com/svolkancav/vpad-helper/releases/latest) [![License: MIT](https://img.shields.io/github/license/svolkancav/vpad-helper)](LICENSE)
 
 
 The free companion app that lets **V-Pad: Virtual Gamepad** on your iPhone act as a
 gamepad for your computer.
 
-**[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad.Helper.exe)** — one file, no installer, lives in the system tray.
+**[⬇ Download for Windows](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad-Helper-Setup.exe)** — a small installer; no administrator rights, and an uninstaller in Add/Remove Programs. The app itself lives in the system tray.
 
-**[⬇ Download for macOS](https://github.com/svolkancav/vpad-helper/releases/download/v0.2.1/V-Pad-Helper.dmg)** — signed and notarised by Apple, so it opens without a Gatekeeper detour. Open the disk image and **drag the app into Applications**, then launch it from there; it lives in the menu bar.
+**[⬇ Download for macOS](https://github.com/svolkancav/vpad-helper/releases/latest/download/V-Pad-Helper.dmg)** — signed and notarised by Apple, so it opens without a Gatekeeper detour. Open the disk image and **drag the app into Applications**, then launch it from there; it lives in the menu bar.
 
 > **Drag it to Applications — this is not optional.** Launched from `~/Downloads`, macOS runs the app *translocated*: from a randomised read-only copy. Permissions you grant are recorded against the path you granted them for, so an Accessibility grant given to the copy in Downloads does not apply to the copy that is actually running, and input is discarded with no error anywhere.
 
@@ -32,7 +32,7 @@ this category ships a desktop component.
 
 ## Install
 
-1. Download the `.exe` above and run it. **No window opens** — this is a tray app: it
+1. Download the installer above and run it. **No window opens** — this is a tray app: it
    installs nothing and just sits next to your clock. On Windows 11 new tray icons
    start out hidden, so click the **^** arrow to find it (Settings → Personalization →
    Taskbar → *Other system tray icons* keeps it visible). A notification on first run
@@ -103,3 +103,20 @@ one phone at a time.
 The helper talks to nothing but your phone, over your own network. No accounts, no
 telemetry, no outbound connections. It listens on an ephemeral TCP port and announces
 itself over mDNS so the phone can find it; that traffic never leaves your LAN.
+
+---
+
+## About this repository
+
+This repository exists to **distribute** V-Pad Helper. The builds attached to each
+release are produced elsewhere and uploaded here; the `.py` and `.spec` files still
+checked in are an old copy kept for history and are **not** what the releases are
+built from. Do not build from them and expect a working helper — a build from this
+tree predates QR pairing, so no current version of the V-Pad app can connect to it.
+
+There is deliberately no CI here. A workflow used to build on every tag and attach
+its own artifact to whatever release the tag created, which on 2026-10-08 attached a
+stale executable to a release built from the real source and overwrote the release
+notes with its own. Publishing is done by hand, from the current source.
+
+Report problems through the app (Settings → About) or the issue tracker.
